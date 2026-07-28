@@ -1,0 +1,32 @@
+.env
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+backend/.venv/
+backend/build/
+backend/dist/
+backend/*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Runtime data
+/data/
+/logs/
+/exports/
+*.db
+*.sqlite
+*.sqlite3

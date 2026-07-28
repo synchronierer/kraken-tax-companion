@@ -1,0 +1,1 @@
+"""Audit trail domain boundary."""

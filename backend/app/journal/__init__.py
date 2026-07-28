@@ -1,0 +1,1 @@
+"""Tax journal domain boundary."""

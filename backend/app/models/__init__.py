@@ -1,0 +1,1 @@
+"""Shared persistence model registry."""

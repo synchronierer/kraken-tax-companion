@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_DIR" || exit 1
+
+for COMMAND in git codex; do
+    if ! command -v "$COMMAND" >/dev/null 2>&1; then
+        echo "Fehler: '$COMMAND' ist nicht installiert oder nicht im PATH."
+        exit 1
+    fi
+done
+
+start_new_codex() {
+    codex \
+        --no-alt-screen \
+        --sandbox workspace-write \
+        --ask-for-approval never
+}
+
+resume_codex() {
+    codex \
+        --no-alt-screen \
+        --sandbox workspace-write \
+        --ask-for-approval never \
+        resume
+}
+
+while true; do
+    echo
+    echo "======================================"
+    echo " Kraken Tax Companion"
+    echo "======================================"
+    echo
+    git status -sb || true
+    echo
+    echo "1) Neue Codex-Sitzung"
+    echo "2) Projekt-Sitzung fortsetzen"
+    echo "3) Shell öffnen"
+    echo "4) Beenden"
+    echo
+
+    read -rp "Auswahl: " CHOICE
+
+    case "$CHOICE" in
+        1)
+            start_new_codex || true
+            ;;
+        2)
+            resume_codex || true
+            ;;
+        3)
+            bash -l
+            ;;
+        4)
+            exit 0
+            ;;
+        *)
+            echo "Ungültige Auswahl."
+            ;;
+    esac
+done

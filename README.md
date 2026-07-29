@@ -67,8 +67,14 @@ logs, and export data.
 
 ## Development
 
+Run `./dev` as the central entry point for the project-local Codex workflow.
+Codex runs in the regular terminal with `--no-alt-screen`, preserving normal
+terminal scrollback, mouse-wheel scrolling, and text selection and copying.
+Continue a previous session through the interactive `codex resume` selection.
 Use `make install` to install local dependencies and `make check` to execute
-the same primary checks as CI. Runtime configuration is read only from
+the same primary checks as CI. See [CONTRIBUTING.md](CONTRIBUTING.md), the
+[Developer Guide](docs/DEVELOPER_GUIDE.md), and
+[CODING_RULES.md](CODING_RULES.md). Runtime configuration is read only from
 environment variables; [.env.example](.env.example) documents supported
 values.
 

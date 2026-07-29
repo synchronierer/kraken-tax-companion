@@ -3,8 +3,8 @@
 ## Context
 
 Kraken Tax Companion preserves evidence and explains every derived result.
-Sprint 2B adds source-neutral ingestion without exchange, tax, FIFO, or
-recommendation behavior.
+Sprint 2C adds a bounded Kraken CSV input adapter to source-neutral ingestion,
+without tax, FIFO, or recommendation behavior.
 
 ## System Overview
 
@@ -14,7 +14,7 @@ Raw Layer -> Domain Layer -> Tax Layer -> Presentation Layer
 
 The Raw Layer preserves external evidence. The Domain Layer represents neutral
 economic facts. Future layers may consume those facts but never mutate sources.
-Sprint 2B operates only in the Raw and Audit layers.
+Sprint 2C still operates only in the Raw and Audit layers.
 
 ## Import Pipeline
 
@@ -42,12 +42,16 @@ immutable `ImportContext`, validation, canonical hashing, duplicate detection,
 raw persistence, audit creation, and session completion. It does not transform
 raw records into domain entities.
 
+`app/adapters/kraken/` contains the Kraken schema contract, immutable parser
+DTOs, and application orchestration. The generic import core and domain do not
+import this package. The parser uses neither SQLAlchemy nor router or UI code.
+
 ## Backend
 
 ### API Layer
 
 FastAPI is the transport boundary. Dependency construction belongs to the
-composition root; domain entities remain unaware of HTTP. Sprint 2B exposes no
+composition root; domain entities remain unaware of HTTP. Sprint 2C exposes no
 import endpoint.
 
 ### Application Services
@@ -90,7 +94,7 @@ A separate recovery transaction then persists the failed session and
 rollback.
 
 Import failures and future domain failures are separated by `ErrorCategory`.
-Sprint 2B persists only import failures and reserves the domain category and
+Sprint 2C persists only import failures and reserves the domain category and
 exception base for later business validation.
 
 ## Persistence
@@ -123,7 +127,7 @@ with session-position uniqueness.
 ## Frontend
 
 The React shell remains a presentation-only consumer. Routes remain
-placeholders and no import interface is added in Sprint 2B.
+placeholders and no import interface is added in Sprint 2C.
 
 ## Cross-Cutting Concerns
 

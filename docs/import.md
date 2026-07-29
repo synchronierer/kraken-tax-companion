@@ -5,15 +5,35 @@
 The import engine preserves external JSON as immutable evidence. It is generic,
 transactional, auditable, and independent of any exchange or transport.
 
-Sprint 2B ends at raw persistence. It performs no domain transformation, tax
-calculation, FIFO allocation, pricing, or recommendation.
+Sprint 2C still ends at raw persistence. It performs no domain transformation,
+tax calculation, FIFO allocation, pricing, or recommendation.
 
 ## Supported Sources
 
 The compatibility entry point accepts one UTF-8 JSON object as `str` or
 `bytes`. The primary batch contract accepts an ordered sequence of generic JSON
-records. Future file and network integrations translate their input into this
-contract. No provider-specific adapter exists yet.
+records. The Kraken CSV adapter translates Ledger History and Trades History
+files into this contract. No network or API integration exists.
+
+## Kraken CSV Adapter
+
+Ledger requires `txid`, `time`, `type`, `asset`, `amount`, and `fee`. Trades
+requires `txid`, `ordertxid`, `pair`, `time`, `type`, `ordertype`, `price`,
+`cost`, `fee`, and `vol`. BOM, outer header whitespace, and case are normalized
+only for detection. Original headers and values remain the payload.
+Normalization collisions and mixed schemas are errors.
+
+Unknown columns and future type values remain unchanged. `aclass` is not
+interpreted. `ledgers` remains a raw string and may additionally have a parsed
+tuple view. Kraken asset codes are not normalized.
+
+Times are parsed as aware UTC. Decimal fields use `Decimal`; decimal commas,
+grouping separators, and scientific notation are outside this CSV contract.
+The parser limits a field to 1 MiB and a file to 128 columns.
+
+An invalid file never reaches `ImportService`. Problems are collected with a
+stable code, source line, and field where possible. CSV values remain inert
+data; a future spreadsheet export must safely render formula prefixes.
 
 ## Import Context
 
@@ -103,6 +123,12 @@ are skipped unless the caller explicitly supplies `retry_failed=True`; a retry
 gets a fresh session. No global retry state exists. Concurrent PostgreSQL
 workers require the atomic claim strategy documented in ADR 0008 before they
 are enabled.
+
+Kraken Ledger and Trades use the separate sources `kraken-ledgers` and
+`kraken-trades`. External IDs are `kraken:ledger:<txid>` and
+`kraken:trade:<txid>`. Duplicate `txid` values in one file are invalid; equal
+`ordertxid` values are valid for multiple trade executions. Different batches
+may retain the same external ID. Cross-file deduplication follows in Sprint 2D.
 
 ## Immutable Storage
 

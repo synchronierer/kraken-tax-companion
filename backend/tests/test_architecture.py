@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import Numeric
@@ -44,3 +45,19 @@ def test_database_types_cover_null_and_postgresql_paths() -> None:
     assert decimal_type.process_result_value("1.25", sqlite_dialect) == Decimal("1.25")
     with pytest.raises(TypeError, match="Decimal"):
         decimal_type.process_bind_param("1.25", sqlite_dialect)  # type: ignore[arg-type]
+
+
+def test_kraken_adapter_respects_dependency_boundaries() -> None:
+    app_root = Path(__file__).parents[1] / "app"
+    core_sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in (app_root / "core").glob("*.py")
+    )
+    import_sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in (app_root / "imports").glob("*.py")
+    )
+    parser_source = (app_root / "adapters" / "kraken" / "parser.py").read_text(
+        encoding="utf-8"
+    )
+    assert "kraken" not in core_sources.lower()
+    assert "app.adapters.kraken" not in import_sources
+    assert "sqlalchemy" not in parser_source.lower()

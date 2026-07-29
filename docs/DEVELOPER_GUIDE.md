@@ -79,6 +79,11 @@ späteren fachlichen Transformationsfehlern getrennt. Ein erfolgreicher Versuch
 ist atomar; nach Rollback wird ein technischer Fehlernachweis in einer eigenen
 Transaktion persistiert. Provider-Adapter bleiben außerhalb der Engine.
 
+Der Kraken-CSV-Adapter liegt unter `backend/app/adapters/kraken/`. Er validiert
+Ledger- und Trade-Exporte vollständig, bevor er geordnete `RawRecordInput`
+übergibt. Parser und DTOs besitzen keine SQLAlchemy-, API- oder steuerliche
+Abhängigkeit.
+
 ## Repository und Unit of Work
 
 Domain-Protokolle definieren Lese- und Schreiboperationen. Application-Dienste
@@ -177,7 +182,7 @@ Weitere Leitlinien:
 
 - [Coding Rules](../CODING_RULES.md)
 - [Contributing](../CONTRIBUTING.md)
-- [Sprint 2B](../SPRINT.md)
+- [Sprint 2C](../SPRINT.md)
 - [Architektur](architecture.md)
 - [Import Engine](import.md)
 - [Architecture Decision Records](adr/)

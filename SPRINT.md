@@ -1,116 +1,79 @@
-# Sprint 2B – Generische Import Engine
+# Sprint 2C – Kraken CSV Adapter
 
 ## Ziel
 
-Eine quellenneutrale, deterministische und auditierbare Import Engine übernimmt
-validierte Rohdaten idempotent. Sie schafft die Grundlage für spätere Adapter
-und fachliche Transformationen, ohne Kraken- oder Steuerlogik vorwegzunehmen.
+Kraken-Exporte für Ledger History und Trades History werden deterministisch
+erkannt, vollständig validiert und als geordnete Rohdatensätze an die
+generische Import Engine übergeben.
 
 ## Ausgangslage
 
-Domain-Entitäten sowie Repository- und Unit-of-Work-Abstraktionen bestehen
-bereits. Der Sprint führt diese Grenzen für Importvorgänge zusammen und
-bewahrt externe Eingaben als unveränderte, nachvollziehbare Evidenz.
+Sprint 2B stellt atomaren Batchimport, kanonischen Hash, Idempotenz, Audit,
+externe IDs und technische Metadaten bereit.
 
 ## Scope
 
-- unveränderlicher `ImportContext` mit Quelle, Version, Akteur,
-  Korrelations-ID, UTC-Eingangszeit und zugehöriger `ImportSession`;
-- deterministischer Import-Hash aus kanonischer Eingabe;
-- Idempotenz anhand von Quelle und Hash;
-- generische Eingabevalidierung;
-- getrennte technische Importfehler und fachliche Transformationsfehler;
-- orchestration durch einen quellenneutralen `ImportService`;
-- explizites Zustandsmodell von `ImportSession`;
-- unveränderliche Speicherung als `RawImportRecord`;
-- Nutzung der bestehenden Repository- und Unit-of-Work-Abstraktionen.
+- abgegrenzter Kraken-Adapter unter `backend/app/adapters/kraken/`;
+- UTF-8-CSV-Verarbeitung mit der Standardbibliothek;
+- unveränderliche DTOs für Ledger-, Trade- und Batchdaten;
+- gesammelt zurückgegebene, strukturierte Validierungsprobleme;
+- atomare Übergabe vollständig gültiger Dateien an `ImportService`;
+- synthetische Unit-, Integrations- und Architekturtests.
 
 ## Nicht-Ziele
 
-- Kraken-spezifischer CSV-Adapter;
-- FIFO-Berechnung;
-- Steuerjournal;
-- Verkaufsempfehlungen;
-- automatische Verkäufe;
-- öffentliche Import-API oder Import-UI.
+- Kraken-API, Zugangsdaten, PDF- oder Balance-Snapshot-Import;
+- Asset-Normalisierung oder Zusammenführung von Trades und Ledgers;
+- EarnLots, Sales, Steuerjournal, FIFO, Empfehlungen oder Steuerbewertung.
 
-## Fachliche Anforderungen
+## Unterstützte Exporttypen
 
-1. Jeder Import ist über Kontext, Session und Korrelations-ID
-   nachvollziehbar.
-2. Inhaltlich gleiche Eingaben derselben Quelle erzeugen keine doppelten
-   Rohdatensätze.
-3. Rohdaten bleiben unverändert und sind von späteren fachlichen Ergebnissen
-   getrennt.
-4. Technische Importfehler werden getrennt von fachlichen
-   Transformationsfehlern klassifiziert.
-5. Erfolgreiche, übersprungene und fehlgeschlagene Vorgänge besitzen einen
-   eindeutigen, prüfbaren Zustand.
+- `kraken-ledgers-csv`, Quelle `kraken-ledgers`, Vertrag
+  `kraken-ledgers-csv-v1`;
+- `kraken-trades-csv`, Quelle `kraken-trades`, Vertrag
+  `kraken-trades-csv-v1`.
 
-## Technische Anforderungen
+## Adaptervertrag
 
-- Der Hash wird deterministisch aus einer eindeutig definierten kanonischen
-  Repräsentation gebildet.
-- Eingaben werden vor Hashing und Persistenz auf Format, Kodierung und
-  Grundstruktur validiert.
-- `ImportService` hängt nur von expliziten Ports, Uhr, ID-Erzeugung und
-  Unit-of-Work-Factory ab.
-- Erlaubte Übergänge der `ImportSession` sind zentral definiert; terminale
-  Zustände lassen keine weiteren Übergänge zu.
-- `RawImportRecord` enthält Quelle, Hash, Originalinhalt, Session-Referenz und
-  einen timezone-aware UTC-Zeitpunkt.
-- Prüfung und Datenbank-Constraint schützen gemeinsam vor Duplikaten.
-- Ein erfolgreicher Import wird atomar persistiert. Fehler rollen den Versuch
-  zurück; technische Fehlernachweise werden in einer getrennten Transaktion
-  gesichert.
-- Domain und Ports bleiben frei von SQLAlchemy.
+Der Dateiname ist beschreibende Provenienz. Identität entsteht aus Quelle und
+geordnetem Record-Hash. Originalheader, Originalwerte, Zusatzfelder,
+Quelldateizeile und Kraken-Transaktions-ID bleiben erhalten.
+
+## Validierung
+
+Header werden nach BOM-Entfernung, Trimmen und Kleinschreibung verglichen.
+Kollisionen, gemischte oder unbekannte Schemata, beschädigtes UTF-8,
+Semikolondateien, fehlerhafte Zeilen, Zeit- und Decimalwerte sowie doppelte
+`txid` werden maschinenlesbar gemeldet. Unbekannte Felder und Typwerte bleiben
+zulässig.
 
 ## Akzeptanzkriterien
 
-- Unterschiedliche Schlüsselreihenfolgen derselben kanonischen Eingabe liefern
-  denselben Hash.
-- Inhaltliche Änderungen liefern einen anderen Hash.
-- Ein wiederholter Import derselben Quelle und desselben Inhalts wird
-  übersprungen und erzeugt keinen weiteren `RawImportRecord`.
-- Ungültige Eingaben werden vor der Rohdatenpersistenz abgewiesen.
-- Jeder erlaubte und unerlaubte Session-Übergang verhält sich deterministisch.
-- Erfolgs-, Duplikat- und Fehlerpfade aktualisieren Zähler und Endzustand
-  korrekt.
-- Repository- und Unit-of-Work-Grenzen werden eingehalten.
+- Ledger und Trades werden ohne Dateinamenheuristik erkannt.
+- Alle Zeilen sind gültig oder es findet keine Persistenz statt.
+- Zeitwerte sind aware UTC; Finanzwerte verwenden ausschließlich `Decimal`.
+- LF/CRLF, BOM und Dateiname ändern bei gleichen Records den Hash nicht.
+- Ledger und Trades besitzen getrennte Idempotenzräume.
+- Es entstehen keine steuerlichen Domainobjekte.
 
-## Testanforderungen
+## Tests
 
-- Unit-Tests für Kontextinvarianten, Validierung, Hashing und Zustandsmodell;
-- Service-Tests für Erfolg, Idempotenz, technische Fehler und Rollback;
-- Persistenztests für exakte Decimal- und UTC-Roundtrips sowie Constraints;
-- Migrationstest von leerer Datenbank bis Alembic `head`;
-- Architekturtests gegen SQLAlchemy-Abhängigkeiten in Domain und Application;
-- 100 Prozent Coverage gemäß vorhandener Pytest-Konfiguration.
+Erkennung, CSV-Technik, Kraken-Zeilen, Fehleraggregation, Atomarität,
+Idempotenz, Provenienz und Architekturgrenzen werden mit synthetischen Daten
+getestet. Pytest erzwingt 100 Prozent Backend-Coverage.
 
-## Dokumentationsanforderungen
+## Dokumentation
 
-- Architektur, Importpipeline und Fehlergrenzen dokumentieren;
-- Hash-Kanonisierung und Idempotenzschlüssel eindeutig festhalten;
-- Zustandsübergänge und Transaktionsverhalten beschreiben;
-- wesentliche Architekturentscheidungen als ADR erfassen;
-- Sprint-Ergebnis und verbleibende Nicht-Ziele aktualisieren.
+Developer Guide, Architektur- und Importdokumentation, ADR 0009 und
+`docs/sprint-2c-summary.md` beschreiben Vertrag und Grenzen.
 
 ## Definition of Done
 
-- Alle Anforderungen und Akzeptanzkriterien sind implementiert und getestet.
-- Ruff, Black, MyPy strict und Pytest mit Coverage bestehen.
-- Migrationen laufen vorwärts auf einer leeren Datenbank.
-- Dokumentation und ADRs entsprechen dem implementierten Verhalten.
-- Es gibt keine Kraken-spezifische, FIFO-, Steuerjournal-, Empfehlungs- oder
-  Verkaufslogik.
-- Der Review bestätigt Architekturgrenzen, Datenschutz und
-  Reproduzierbarkeit.
+- Implementierung, Tests und Dokumentation stimmen überein.
+- Alle Repository-Prüfungen einschließlich Alembic und Docker bestehen.
+- Keine Migration und keine Änderung am generischen Hashvertrag sind nötig.
 
 ## Umgesetzter Stand
 
-Die Engine unterstützt den geordneten generischen Batch-Vertrag, typisierte
-Ergebnisse und Fehler, explizite Retries fehlgeschlagener Hashes,
-Lifecycle-Audits sowie persistente Session-Hashes und Datensatzpositionen.
-Kraken-spezifische Adapter und konkurrierende PostgreSQL-Worker bleiben
-außerhalb dieses Sprints; vor Letzteren ist die atomare Claim-Strategie aus
-ADR 0008 umzusetzen.
+Sprint 2C ist umgesetzt. Steuerliche Transformation und dateiübergreifende
+Deduplizierung verbleiben in Sprint 2D.

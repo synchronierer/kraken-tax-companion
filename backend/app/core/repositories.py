@@ -33,7 +33,9 @@ class SaleRepository(Repository[Sale], Protocol):
 
 
 class ImportSessionRepository(Repository[ImportSession], Protocol):
-    pass
+    def find_by_hash(
+        self, source: str, import_hash: str, *, exclude_id: UUID | None = None
+    ) -> ImportSession | None: ...
 
 
 class RawImportRepository(Repository[RawImportRecord], Protocol):

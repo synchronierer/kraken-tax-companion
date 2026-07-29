@@ -3,6 +3,24 @@
 Sprint 2B – Generic Import Engine ist vollständig implementiert, geprüft und
 lokal committed.
 
+## Ergänzung zum generischen Batch-Vertrag
+
+Der nachträgliche Abgleich mit den erweiterten Sprint-2B-Akzeptanzkriterien
+ergänzt:
+
+- geordnete Mehrdatensatz-Imports mit streamingfähigem Batch-Hash;
+- persistente Import-Hashes, Fehlerzusammenfassungen und Datensatzpositionen;
+- externe Datensatz-IDs und getrennte technische Metadaten;
+- typisierte Erfolgs-, Duplikat- und Fehlerergebnisse;
+- explizites Retry-Verhalten nach registrierten Fehlschlägen;
+- Lifecycle-Audits für Anlage, Start, Abschluss, Fehler und Duplikate;
+- Migration `0003_import_batch_model`; und
+- ADR 0008 für Hash, Idempotenz, Fehlergrenzen und Zustandsmodell.
+
+Die unten stehenden historischen Prüfergebnisse gehören zum Commit `004ed8e`.
+Die Ergebnisse der Ergänzung werden im aktuellen Sprint-Abschlussbericht
+separat ausgewiesen.
+
 ## Umgesetzte Import-Infrastruktur
 
 - Generische, providerunabhängige JSON-Import-Pipeline

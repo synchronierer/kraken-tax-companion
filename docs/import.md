@@ -10,9 +10,10 @@ calculation, FIFO allocation, pricing, or recommendation.
 
 ## Supported Sources
 
-The engine accepts UTF-8 JSON objects from internal callers as `str` or
-`bytes`. Future file and network integrations will be adapters that translate
-their input into this contract. No provider-specific adapter exists yet.
+The compatibility entry point accepts one UTF-8 JSON object as `str` or
+`bytes`. The primary batch contract accepts an ordered sequence of generic JSON
+records. Future file and network integrations translate their input into this
+contract. No provider-specific adapter exists yet.
 
 ## Import Context
 
@@ -22,9 +23,16 @@ Each run creates an `ImportSession` and immutable `ImportContext` containing:
 - aware UTC receipt time;
 - user or system actor;
 - correlation ID; and
-- the matching import session.
+- the matching import session;
+- an original file or logical source name (falling back to `source`);
+- optional descriptive user metadata; and
+- optional, explicitly controlled identity data.
 
 Context construction rejects values that differ from the session.
+Source, version, logical source name, and identity data define context
+equality. Receipt time, session, actor, correlation ID, and descriptive
+metadata provide provenance only and do not affect equality or the content
+hash.
 
 ## State Machine
 
@@ -68,6 +76,12 @@ hexadecimal string. An optional expected hash is compared case-insensitively.
 JSON object key order therefore does not affect identity, while any meaningful
 value or array-order change does.
 
+For batches the ordered canonical records are framed with a versioned domain
+separator and byte lengths before SHA-256 is updated incrementally. Record
+order is significant. Unicode and line endings inside JSON string values are
+preserved; only JSON syntax is canonicalized. Import time, UUIDs, actor data,
+file name, and user metadata never enter this hash.
+
 ## Idempotency
 
 Identity is the pair `(source, content_hash)`. Before persistence, the engine
@@ -78,14 +92,25 @@ checks the raw repository for this pair. An identical repeat:
 - completes its own `ImportSession`; and
 - records one received and one skipped item.
 
-A database unique constraint on the same pair provides a final concurrency
-guard.
+This compatibility behavior is retained for existing callers. Migration 0003
+removes the record-level uniqueness constraint because equal records are valid
+inside one ordered batch.
+
+For the batch API the pair is `(source, import_hash)` and is queried through
+the session repository in the same unit of work. Completed attempts return
+`ImportOutcome.DUPLICATE`. Failed attempts are relevant registrations too and
+are skipped unless the caller explicitly supplies `retry_failed=True`; a retry
+gets a fresh session. No global retry state exists. Concurrent PostgreSQL
+workers require the atomic claim strategy documented in ADR 0008 before they
+are enabled.
 
 ## Immutable Storage
 
-New input is stored once as a `RawImportRecord` containing source, canonical
-hash, original parsed JSON payload, import-session reference, and UTC creation
-time. ORM update hooks reject later mutation.
+New input is stored as ordered `RawImportRecord` rows containing source,
+record hash, original parsed JSON payload, import-session reference, zero-based
+sequence, optional external ID, separate technical metadata, and UTC creation
+time. Repeated equal payloads in the same artifact remain distinguishable by
+position. ORM update hooks reject later mutation.
 
 ## Transactions
 
@@ -95,19 +120,21 @@ failed session and `ImportError` so operational failure evidence survives.
 
 ## Audit and Provenance
 
-A newly persisted raw record creates exactly one `raw_import.persisted` event
-with entity identity, actor, session, correlation ID, source, and content hash.
-Skipped duplicates deliberately do not duplicate that event.
+Lifecycle events cover `import.created`, `import.started`, `import.completed`,
+`import.failed`, and `import.duplicate_detected`. The compatibility path also
+retains `raw_import.persisted`. Events contain identities and summaries, never
+raw payloads.
 
 ## Error Reporting
 
 `ImportError` records UTC time, session, category, stable error code,
 description, original exception summary, and affected record when available.
 
-`ErrorCategory.IMPORT` covers parsing, integrity, validation, I/O, and
-infrastructure failures. `ErrorCategory.DOMAIN` and `DomainValidationError`
-reserve a separate boundary for future business rules; Sprint 2B does not apply
-or persist such rules.
+Machine-readable issues contain code, message, category, and optional record
+position and field. Categories distinguish technical input, structural
+validation, transformation, and persistence. SQLAlchemy exceptions are
+translated into persistence failures at the application boundary. Expected
+duplicates are results, not unexpected system exceptions.
 
 ## Security
 

@@ -3,6 +3,10 @@
 - Status: Accepted
 - Date: 2026-07-29
 
+> Superseded for the batch API by ADR 0008. The compatibility single-object
+> API retains this behavior except for the database constraint removed by
+> migration 0003.
+
 ## Context
 
 External deliveries can be retried, replayed, or received concurrently.

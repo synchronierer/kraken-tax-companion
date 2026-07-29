@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -62,6 +63,8 @@ class ImportSession:
     skipped_count: int = 0
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
+    import_hash: str | None = None
+    error_summary: str | None = None
 
     def __post_init__(self) -> None:
         self.source = required_text(self.source, "source")
@@ -77,6 +80,15 @@ class ImportSession:
                 raise ValueError("ended_at must not be earlier than started_at.")
         self.created_at = require_utc(self.created_at)
         self.updated_at = require_utc(self.updated_at)
+        if self.import_hash is not None:
+            normalized_hash = self.import_hash.strip().lower()
+            if len(normalized_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in normalized_hash
+            ):
+                raise ValueError("import_hash must be a SHA-256 hexadecimal digest.")
+            self.import_hash = normalized_hash
+        if self.error_summary is not None:
+            self.error_summary = required_text(self.error_summary, "error_summary")
 
 
 @dataclass(kw_only=True)
@@ -171,12 +183,20 @@ class RawImportRecord:
     payload: dict[str, Any]
     id: UUID = field(default_factory=new_id)
     created_at: datetime = field(default_factory=utc_now)
+    sequence_number: int = 0
+    external_id: str | None = None
+    technical_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.source = required_text(self.source, "source")
         self.content_hash = required_text(self.content_hash, "content_hash")
-        self.payload = dict(self.payload)
+        self.payload = deepcopy(self.payload)
         self.created_at = require_utc(self.created_at)
+        if self.sequence_number < 0:
+            raise ValueError("sequence_number must not be negative.")
+        if self.external_id is not None:
+            self.external_id = required_text(self.external_id, "external_id")
+        self.technical_metadata = deepcopy(self.technical_metadata)
 
 
 @dataclass(kw_only=True)

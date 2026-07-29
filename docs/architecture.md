@@ -100,9 +100,10 @@ exception base for later business validation.
 UUIDs use SQLAlchemy's portable type. Decimal amounts use canonical strings to
 avoid binary floating-point conversion. Reads restore UTC awareness.
 
-Source and SHA-256 have a database uniqueness constraint in addition to the
-service-level duplicate check. This protects idempotency against concurrent
-writers.
+Batch idempotency queries session source and SHA-256 inside the unit of work.
+Raw records are unique by session and sequence, allowing equal payloads in one
+artifact. SQLite's serialized writer model is supported. Concurrent PostgreSQL
+import workers remain disabled until ADR 0008's atomic claim is implemented.
 
 ### PostgreSQL Migration Path
 
@@ -114,7 +115,10 @@ application logic.
 
 Revision `0001_domain_foundation` creates the foundational tables. Revision
 `0002_generic_import_engine` introduces the session lifecycle fields,
-idempotency constraint, and import errors without seed data.
+the original idempotency constraint, and import errors without seed data.
+Revision `0003_import_batch_model` adds persistent batch hashes, error
+summaries, ordered record metadata, and replaces record-content uniqueness
+with session-position uniqueness.
 
 ## Frontend
 

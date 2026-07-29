@@ -16,7 +16,8 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
 
     command.upgrade(config, "head")
     command.check(config)
-    tables = set(inspect(create_engine(database_url)).get_table_names())
+    inspector = inspect(create_engine(database_url))
+    tables = set(inspector.get_table_names())
     assert tables == {
         "alembic_version",
         "audit_events",
@@ -28,6 +29,16 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "raw_import_records",
         "sales",
     }
+    assert {"import_hash", "error_summary"}.issubset(
+        {column["name"] for column in inspector.get_columns("import_sessions")}
+    )
+    assert {"sequence_number", "external_id", "technical_metadata"}.issubset(
+        {column["name"] for column in inspector.get_columns("raw_import_records")}
+    )
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("raw_import_records")
+    } == {"uq_raw_import_session_sequence"}
 
     command.downgrade(config, "base")
     assert inspect(create_engine(database_url)).get_table_names() == ["alembic_version"]

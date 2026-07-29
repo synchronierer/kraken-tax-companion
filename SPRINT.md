@@ -105,3 +105,12 @@ bewahrt externe Eingaben als unveränderte, nachvollziehbare Evidenz.
   Verkaufslogik.
 - Der Review bestätigt Architekturgrenzen, Datenschutz und
   Reproduzierbarkeit.
+
+## Umgesetzter Stand
+
+Die Engine unterstützt den geordneten generischen Batch-Vertrag, typisierte
+Ergebnisse und Fehler, explizite Retries fehlgeschlagener Hashes,
+Lifecycle-Audits sowie persistente Session-Hashes und Datensatzpositionen.
+Kraken-spezifische Adapter und konkurrierende PostgreSQL-Worker bleiben
+außerhalb dieses Sprints; vor Letzteren ist die atomare Claim-Strategie aus
+ADR 0008 umzusetzen.

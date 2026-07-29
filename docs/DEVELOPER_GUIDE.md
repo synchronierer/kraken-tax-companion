@@ -66,11 +66,12 @@ UTC und Zeitzoneninformation erhalten.
 
 ## Importarchitektur
 
-Die generische Pipeline validiert quellenneutrale JSON-Objekte, bildet eine
-kanonische Repräsentation, berechnet SHA-256 und prüft Idempotenz anhand von
-Quelle und Hash. `ImportContext` bindet Quelle, Akteur, Korrelations-ID,
-UTC-Zeit und `ImportSession`. `ImportService` orchestriert Zustand,
-Repositorys, Unit of Work, Audit und Fehlernachweis.
+Die generische Pipeline validiert geordnete, quellenneutrale JSON-Datensätze,
+bildet eine kanonische Streaming-Repräsentation, berechnet SHA-256 und prüft
+Idempotenz anhand von Quelle und Import-Hash. `ImportContext` trennt explizite
+Identitätsdaten von beschreibender Provenienz. `ImportService` orchestriert
+Zustand, typisierte Ergebnisse, Repositorys, Unit of Work, Lifecycle-Audit und
+Fehlernachweis.
 
 `RawImportRecord` bewahrt die Eingabe unverändert. Die Import-Session folgt
 einem zentral definierten Zustandsmodell. Technische Importfehler sind von

@@ -53,6 +53,12 @@ import_sessions = Table(
     Column("skipped_count", Integer, nullable=False),
     Column("created_at", UtcDateTime(), nullable=False),
     Column("updated_at", UtcDateTime(), nullable=False),
+    Column("import_hash", String(64), nullable=True),
+    Column("error_summary", String(1024), nullable=True),
+    CheckConstraint(
+        "import_hash IS NULL OR length(import_hash) = 64",
+        name="ck_import_sessions_hash_length",
+    ),
 )
 
 
@@ -134,7 +140,14 @@ raw_import_records = Table(
     Column("content_hash", String(128), nullable=False),
     Column("payload", JSON, nullable=False),
     Column("created_at", UtcDateTime(), nullable=False),
-    UniqueConstraint("source", "content_hash", name="uq_raw_import_source_hash"),
+    Column("sequence_number", Integer, nullable=False),
+    Column("external_id", String(255), nullable=True),
+    Column("technical_metadata", JSON, nullable=False),
+    UniqueConstraint(
+        "import_session_id",
+        "sequence_number",
+        name="uq_raw_import_session_sequence",
+    ),
 )
 
 import_errors = Table(

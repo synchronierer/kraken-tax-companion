@@ -2,6 +2,7 @@ from datetime import datetime
 
 from app.core.entities import ImportSession, ImportStatus
 from app.core.time import require_utc
+from app.imports.errors import InvalidStateTransitionError
 
 FAILURE_TARGETS = {ImportStatus.FAILED, ImportStatus.CANCELLED}
 ALLOWED_TRANSITIONS: dict[ImportStatus, frozenset[ImportStatus]] = {
@@ -21,8 +22,9 @@ ALLOWED_TRANSITIONS: dict[ImportStatus, frozenset[ImportStatus]] = {
 }
 
 
-class InvalidImportTransition(ValueError):
-    pass
+class InvalidImportTransition(InvalidStateTransitionError, ValueError):
+    def __init__(self, description: str) -> None:
+        super().__init__(code="invalid_state_transition", description=description)
 
 
 def transition(

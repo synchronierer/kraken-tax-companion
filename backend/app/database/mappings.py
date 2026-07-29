@@ -6,8 +6,10 @@ from sqlalchemy import (
     Column,
     Enum,
     ForeignKey,
+    Integer,
     String,
     Table,
+    UniqueConstraint,
     event,
 )
 from sqlalchemy.orm import Mapper
@@ -18,6 +20,8 @@ from app.core.entities import (
     AuditEvent,
     Configuration,
     EarnLot,
+    ErrorCategory,
+    ImportError,
     ImportSession,
     ImportStatus,
     PriceSnapshot,
@@ -40,7 +44,13 @@ import_sessions = Table(
     Column("version", String(64), nullable=False),
     Column("status", Enum(ImportStatus, native_enum=False), nullable=False),
     Column("started_at", UtcDateTime(), nullable=False),
+    Column("correlation_id", UUID, nullable=False, unique=True),
+    Column("actor_type", Enum(AuditActorType, native_enum=False), nullable=False),
+    Column("actor_id", String(255), nullable=False),
     Column("ended_at", UtcDateTime(), nullable=True),
+    Column("received_count", Integer, nullable=False),
+    Column("persisted_count", Integer, nullable=False),
+    Column("skipped_count", Integer, nullable=False),
     Column("created_at", UtcDateTime(), nullable=False),
     Column("updated_at", UtcDateTime(), nullable=False),
 )
@@ -124,6 +134,20 @@ raw_import_records = Table(
     Column("content_hash", String(128), nullable=False),
     Column("payload", JSON, nullable=False),
     Column("created_at", UtcDateTime(), nullable=False),
+    UniqueConstraint("source", "content_hash", name="uq_raw_import_source_hash"),
+)
+
+import_errors = Table(
+    "import_errors",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    import_reference(),
+    Column("occurred_at", UtcDateTime(), nullable=False),
+    Column("category", Enum(ErrorCategory, native_enum=False), nullable=False),
+    Column("error_code", String(128), nullable=False),
+    Column("description", String(1024), nullable=False),
+    Column("original_exception", String(2048), nullable=False),
+    Column("affected_record", JSON, nullable=True),
 )
 
 
@@ -141,6 +165,7 @@ def configure_mappings() -> None:
         mapper_registry.map_imperatively(AuditEvent, audit_events),
         mapper_registry.map_imperatively(PriceSnapshot, price_snapshots),
         mapper_registry.map_imperatively(RawImportRecord, raw_import_records),
+        mapper_registry.map_imperatively(ImportError, import_errors),
     ]
     mapper_registry.map_imperatively(ImportSession, import_sessions)
     mapper_registry.map_imperatively(Sale, sales)

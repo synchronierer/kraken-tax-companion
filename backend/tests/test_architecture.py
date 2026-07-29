@@ -24,14 +24,14 @@ def test_service_dependencies_hold_future_transaction_factory() -> None:
         unit_of_work_factory=factory,  # type: ignore[arg-type]
         id_generator=Uuid4IdGenerator(),
     )
-    assert dependencies.unit_of_work_factory is factory
+    assert id(dependencies.unit_of_work_factory) == id(factory)
 
 
 def test_database_types_cover_null_and_postgresql_paths() -> None:
     utc_type = UtcDateTime()
     decimal_type = ExactDecimal()
     sqlite_dialect = sqlite.dialect()
-    postgres_dialect = postgresql.dialect()
+    postgres_dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
 
     assert utc_type.process_result_value(None, sqlite_dialect) is None
     assert decimal_type.load_dialect_impl(sqlite_dialect).__class__.__name__ == "String"

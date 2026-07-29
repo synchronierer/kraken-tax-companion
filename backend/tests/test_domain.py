@@ -27,8 +27,11 @@ def import_session() -> ImportSession:
     return ImportSession(
         source="exchange-export",
         version="1",
-        status=ImportStatus.PENDING,
+        status=ImportStatus.CREATED,
         started_at=NOW,
+        correlation_id=new_id(),
+        actor_type=AuditActorType.SYSTEM,
+        actor_id="test-suite",
     )
 
 
@@ -92,6 +95,9 @@ def test_import_session_accepts_valid_end_time() -> None:
         version="1",
         status=ImportStatus.COMPLETED,
         started_at=NOW,
+        correlation_id=new_id(),
+        actor_type=AuditActorType.SYSTEM,
+        actor_id="test-suite",
         ended_at=NOW + timedelta(minutes=1),
     )
     assert session.ended_at == NOW + timedelta(minutes=1)
@@ -104,6 +110,9 @@ def test_import_session_rejects_end_before_start() -> None:
             version="1",
             status=ImportStatus.FAILED,
             started_at=NOW,
+            correlation_id=new_id(),
+            actor_type=AuditActorType.SYSTEM,
+            actor_id="test-suite",
             ended_at=NOW - timedelta(seconds=1),
         )
 

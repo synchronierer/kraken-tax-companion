@@ -10,10 +10,20 @@ from app.core.time import require_utc, utc_now
 
 
 class ImportStatus(StrEnum):
-    PENDING = "pending"
-    RUNNING = "running"
+    CREATED = "created"
+    RECEIVED = "received"
+    VALIDATING = "validating"
+    HASHING = "hashing"
+    CHECKING_DUPLICATES = "checking_duplicates"
+    PERSISTING = "persisting"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ErrorCategory(StrEnum):
+    IMPORT = "import"
+    DOMAIN = "domain"
 
 
 class AuditActorType(StrEnum):
@@ -42,14 +52,24 @@ class ImportSession:
     version: str
     status: ImportStatus
     started_at: datetime
+    correlation_id: UUID
+    actor_type: AuditActorType
+    actor_id: str
     id: UUID = field(default_factory=new_id)
     ended_at: datetime | None = None
+    received_count: int = 0
+    persisted_count: int = 0
+    skipped_count: int = 0
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
         self.source = required_text(self.source, "source")
         self.version = required_text(self.version, "version")
+        self.actor_id = required_text(self.actor_id, "actor_id")
+        for field_name in ("received_count", "persisted_count", "skipped_count"):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name} must not be negative.")
         self.started_at = require_utc(self.started_at)
         if self.ended_at is not None:
             self.ended_at = require_utc(self.ended_at)
@@ -157,3 +177,25 @@ class RawImportRecord:
         self.content_hash = required_text(self.content_hash, "content_hash")
         self.payload = dict(self.payload)
         self.created_at = require_utc(self.created_at)
+
+
+@dataclass(kw_only=True)
+class ImportError:
+    occurred_at: datetime
+    import_session_id: UUID
+    category: ErrorCategory
+    error_code: str
+    description: str
+    original_exception: str
+    affected_record: dict[str, Any] | None
+    id: UUID = field(default_factory=new_id)
+
+    def __post_init__(self) -> None:
+        self.occurred_at = require_utc(self.occurred_at)
+        self.error_code = required_text(self.error_code, "error_code")
+        self.description = required_text(self.description, "description")
+        self.original_exception = required_text(
+            self.original_exception, "original_exception"
+        )
+        if self.affected_record is not None:
+            self.affected_record = dict(self.affected_record)

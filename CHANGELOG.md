@@ -9,6 +9,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Generic Sprint 2B JSON import pipeline with immutable import context.
+- Deterministic canonical JSON hashing and SHA-256 integrity verification.
+- Central import-session state machine and explicit terminal states.
+- Idempotent raw persistence with database-level duplicate protection.
+- SQLAlchemy repositories, transactional unit of work, and import orchestration.
+- Persistent import errors with separate import and domain error categories.
+- Import pipeline, idempotency, and canonical hashing architecture decisions.
 - Framework-independent Sprint 2A domain and raw evidence entities.
 - Imperative SQLAlchemy mappings and the first domain migration.
 - Repository, unit-of-work, service dependency, and DI boundaries.

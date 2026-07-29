@@ -23,6 +23,7 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "configurations",
         "earn_lots",
         "import_sessions",
+        "import_errors",
         "price_snapshots",
         "raw_import_records",
         "sales",

@@ -2,7 +2,14 @@ from collections.abc import Sequence
 from typing import Protocol, TypeVar
 from uuid import UUID
 
-from app.core.entities import AuditEvent, EarnLot, ImportSession, RawImportRecord, Sale
+from app.core.entities import (
+    AuditEvent,
+    EarnLot,
+    ImportError,
+    ImportSession,
+    RawImportRecord,
+    Sale,
+)
 
 EntityT = TypeVar("EntityT")
 
@@ -29,9 +36,19 @@ class ImportSessionRepository(Repository[ImportSession], Protocol):
     pass
 
 
-class RawImportRecordRepository(Repository[RawImportRecord], Protocol):
+class RawImportRepository(Repository[RawImportRecord], Protocol):
+    def find_by_hash(
+        self, source: str, content_hash: str
+    ) -> RawImportRecord | None: ...
+
+
+class AuditRepository(Repository[AuditEvent], Protocol):
     pass
 
 
-class AuditEventRepository(Repository[AuditEvent], Protocol):
+class ImportErrorRepository(Repository[ImportError], Protocol):
     pass
+
+
+RawImportRecordRepository = RawImportRepository
+AuditEventRepository = AuditRepository

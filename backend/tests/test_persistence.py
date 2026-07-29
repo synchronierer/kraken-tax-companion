@@ -6,7 +6,13 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app import models
-from app.core.entities import EarnLot, ImportSession, ImportStatus, RawImportRecord
+from app.core.entities import (
+    AuditActorType,
+    EarnLot,
+    ImportSession,
+    ImportStatus,
+    RawImportRecord,
+)
 from app.core.identifiers import new_id
 from app.database.base import Base
 
@@ -17,7 +23,13 @@ def test_decimal_and_utc_round_trip() -> None:
     Base.metadata.create_all(engine)
     now = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
     imported = ImportSession(
-        source="file", version="1", status=ImportStatus.COMPLETED, started_at=now
+        source="file",
+        version="1",
+        status=ImportStatus.COMPLETED,
+        started_at=now,
+        correlation_id=new_id(),
+        actor_type=AuditActorType.SYSTEM,
+        actor_id="test-suite",
     )
     lot = EarnLot(
         lot_id=new_id(),
@@ -42,7 +54,13 @@ def test_immutable_records_reject_updates() -> None:
     Base.metadata.create_all(engine)
     now = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
     imported = ImportSession(
-        source="file", version="1", status=ImportStatus.COMPLETED, started_at=now
+        source="file",
+        version="1",
+        status=ImportStatus.COMPLETED,
+        started_at=now,
+        correlation_id=new_id(),
+        actor_type=AuditActorType.SYSTEM,
+        actor_id="test-suite",
     )
     record = RawImportRecord(
         import_session_id=imported.id,

@@ -1,11 +1,13 @@
 from sqlalchemy.orm import Session
 
+from app import models
 from app.database.base import Base
 from app.database.session import get_session
 
 
-def test_metadata_starts_without_application_tables() -> None:
-    assert Base.metadata.tables == {}
+def test_metadata_contains_domain_tables() -> None:
+    models.configure_mappings()
+    assert len(Base.metadata.tables) == 7
 
 
 def test_session_dependency_provides_session() -> None:

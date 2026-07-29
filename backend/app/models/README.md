@@ -1,4 +1,6 @@
 # Models
 
-Registers persistence mappings while keeping domain behavior outside ORM
-entities. No application tables exist in the initial repository.
+Registers the imperative SQLAlchemy mappings for framework-independent domain
+entities. The metadata contains the Sprint 2A tables and is the source for
+Alembic schema comparison. Importing this package configures mappings exactly
+once; application behavior must remain outside this module.

@@ -9,6 +9,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Framework-independent Sprint 2A domain and raw evidence entities.
+- Imperative SQLAlchemy mappings and the first domain migration.
+- Repository, unit-of-work, service dependency, and DI boundaries.
+- Exact Decimal and aware UTC persistence adapters.
+- Domain architecture decisions and complete test coverage.
 - Initial repository structure.
 - FastAPI health endpoint and application configuration.
 - React application shell with dark theme and placeholder routes.

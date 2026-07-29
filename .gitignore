@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .DS_Store
 .idea/
 .vscode/
@@ -11,6 +13,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .coverage
+coverage/
+coverage.xml
 htmlcov/
 .venv/
 backend/.venv/

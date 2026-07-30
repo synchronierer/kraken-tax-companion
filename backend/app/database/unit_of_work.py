@@ -5,12 +5,34 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.entities import EarnLot, Sale
 from app.core.repositories import (
+    AcquisitionRepository,
     AuditRepository,
+    DisposalRepository,
+    DomainProvenanceRepository,
     EarnLotRepository,
+    FeeEventRepository,
     ImportErrorRepository,
     ImportSessionRepository,
     RawImportRepository,
     SaleRepository,
+    TradeExecutionRepository,
+    TransformationDecisionRepository,
+    TransformationIssueRepository,
+    TransformationRunRepository,
+    TransformationRunSessionRepository,
+    ValuationRequirementRepository,
+)
+from app.core.transformation import (
+    AcquisitionLot,
+    DisposalEvent,
+    DomainProvenance,
+    FeeEvent,
+    TradeExecution,
+    TransformationDecision,
+    TransformationIssue,
+    TransformationRun,
+    TransformationRunSession,
+    ValuationRequirement,
 )
 from app.database.repositories import (
     SqlAlchemyAuditRepository,
@@ -18,6 +40,7 @@ from app.database.repositories import (
     SqlAlchemyImportSessionRepository,
     SqlAlchemyRawImportRepository,
     SqlAlchemyRepository,
+    SqlAlchemyStableProjectionRepository,
 )
 
 
@@ -28,6 +51,16 @@ class SqlAlchemyUnitOfWork:
     raw_imports: RawImportRepository
     audit: AuditRepository
     import_errors: ImportErrorRepository
+    transformation_runs: TransformationRunRepository
+    transformation_run_sessions: TransformationRunSessionRepository
+    transformation_decisions: TransformationDecisionRepository
+    transformation_issues: TransformationIssueRepository
+    acquisitions: AcquisitionRepository
+    disposals: DisposalRepository
+    trade_executions: TradeExecutionRepository
+    fee_events: FeeEventRepository
+    domain_provenance: DomainProvenanceRepository
+    valuation_requirements: ValuationRequirementRepository
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
@@ -42,6 +75,32 @@ class SqlAlchemyUnitOfWork:
         self.raw_imports = SqlAlchemyRawImportRepository(self._session)
         self.audit = SqlAlchemyAuditRepository(self._session)
         self.import_errors = SqlAlchemyImportErrorRepository(self._session)
+        self.transformation_runs = SqlAlchemyRepository(
+            self._session, TransformationRun
+        )
+        self.transformation_run_sessions = SqlAlchemyRepository(
+            self._session, TransformationRunSession
+        )
+        self.transformation_decisions = SqlAlchemyRepository(
+            self._session, TransformationDecision
+        )
+        self.transformation_issues = SqlAlchemyRepository(
+            self._session, TransformationIssue
+        )
+        self.acquisitions = SqlAlchemyStableProjectionRepository(
+            self._session, AcquisitionLot
+        )
+        self.disposals = SqlAlchemyStableProjectionRepository(
+            self._session, DisposalEvent
+        )
+        self.trade_executions = SqlAlchemyStableProjectionRepository(
+            self._session, TradeExecution
+        )
+        self.fee_events = SqlAlchemyStableProjectionRepository(self._session, FeeEvent)
+        self.domain_provenance = SqlAlchemyRepository(self._session, DomainProvenance)
+        self.valuation_requirements = SqlAlchemyRepository(
+            self._session, ValuationRequirement
+        )
         self.committed = False
         return self
 

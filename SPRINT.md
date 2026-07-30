@@ -1,79 +1,102 @@
-# Sprint 2C – Kraken CSV Adapter
+# Sprint 2D – Transformation von Kraken-Rohdaten in fachliche Ereignisse
 
 ## Ziel
 
-Kraken-Exporte für Ledger History und Trades History werden deterministisch
-erkannt, vollständig validiert und als geordnete Rohdatensätze an die
-generische Import Engine übergeben.
+Revisionssicher importierte Kraken-Rohdaten werden atomar, idempotent und
+nachvollziehbar in providerneutrale wirtschaftliche Fakten transformiert.
 
 ## Ausgangslage
 
-Sprint 2B stellt atomaren Batchimport, kanonischen Hash, Idempotenz, Audit,
-externe IDs und technische Metadaten bereit.
+Sprint 2C bewahrt Ledger- und Trade-CSV-Zeilen unverändert mit externer
+Kraken-ID, ImportSession, Hash und technischen Metadaten auf.
 
 ## Scope
 
-- abgegrenzter Kraken-Adapter unter `backend/app/adapters/kraken/`;
-- UTF-8-CSV-Verarbeitung mit der Standardbibliothek;
-- unveränderliche DTOs für Ledger-, Trade- und Batchdaten;
-- gesammelt zurückgegebene, strukturierte Validierungsprobleme;
-- atomare Übergabe vollständig gültiger Dateien an `ImportService`;
-- synthetische Unit-, Integrations- und Architekturtests.
+- explizite Transformationsläufe und eine Entscheidung je RawImportRecord;
+- Earn-/Staking-Rewards und interne Bewegungen;
+- TradeExecution, AcquisitionLot, DisposalEvent und FeeEvent;
+- versionierte Asset-Aliase und konservative Pair-Auflösung;
+- Ledger-/Trade-Abgleich und eindeutig referenzierte Ledger-only-Vorgänge;
+- vollständige Raw-/Session-/Run-Provenienz und Bewertungsvormerkungen;
+- strukturierte Review-, Konflikt-, Duplikat- und Fehlerfälle.
 
 ## Nicht-Ziele
 
-- Kraken-API, Zugangsdaten, PDF- oder Balance-Snapshot-Import;
-- Asset-Normalisierung oder Zusammenführung von Trades und Ledgers;
-- EarnLots, Sales, Steuerjournal, FIFO, Empfehlungen oder Steuerbewertung.
+Kursabruf, tatsächliche EUR-Bewertung, Steuerjournal, FIFO, Gewinn-/Verlust-,
+Freigrenzen- oder Steuerberechnung, Empfehlungen, Verkäufe, API-Synchronisation
+sowie Web- oder API-Endpunkte bleiben ausgeschlossen.
 
-## Unterstützte Exporttypen
+## Transformationsregeln
 
-- `kraken-ledgers-csv`, Quelle `kraken-ledgers`, Vertrag
-  `kraken-ledgers-csv-v1`;
-- `kraken-trades-csv`, Quelle `kraken-trades`, Vertrag
-  `kraken-trades-csv-v1`.
+Jeder ausgewählte Rohdatensatz erhält genau eine Entscheidung. Die Identität
+einer Projektion besteht aus Provider, externer Datensatzidentität,
+Ereignistyp und Transformationsversion. Abweichender Payload bei gleicher
+Identität wird als Konflikt gespeichert.
 
-## Adaptervertrag
+## Reward-Klassifikation
 
-Der Dateiname ist beschreibende Provenienz. Identität entsteht aus Quelle und
-geordnetem Record-Hash. Originalheader, Originalwerte, Zusatzfelder,
-Quelldateizeile und Kraken-Transaktions-ID bleiben erhalten.
+Positive `earn/reward`-Datensätze und konservativ eindeutige positive
+Legacy-`staking`-Datensätze erzeugen Erwerbe. Brutto, Gebühr und Netto bleiben
+getrennt. `TaxTreatmentHint` ist nur ein überprüfbarer Hinweis, keine
+individuelle Rechtsentscheidung.
 
-## Validierung
+## Interne Bewegungen
 
-Header werden nach BOM-Entfernung, Trimmen und Kleinschreibung verglichen.
-Kollisionen, gemischte oder unbekannte Schemata, beschädigtes UTF-8,
-Semikolondateien, fehlerhafte Zeilen, Zeit- und Decimalwerte sowie doppelte
-`txid` werden maschinenlesbar gemeldet. Unbekannte Felder und Typwerte bleiben
-zulässig.
+Allocation, Autoallocation, Deallocation, Migration sowie Spot-/Staking-
+Umbuchungen werden als interne Bewegung entschieden und erzeugen weder Erwerb
+noch Veräußerung.
+
+## Trades
+
+Jede Kraken-`txid` bleibt eine eigene TradeExecution. Buy und Sell erzeugen
+den erhaltenen Erwerb; die Hingabe eines Kryptowerts erzeugt zusätzlich eine
+Veräußerung. Mehrere Ausführungen derselben `ordertxid` bleiben getrennt.
+
+## Gebühren
+
+Tradegebühren werden als FeeEvent gespeichert. Rewardgebühren bleiben als
+Brutto-/Gebühr-/Netto-Bestandteil des Erwerbs nachvollziehbar. Es findet keine
+Gewinnberechnung statt.
+
+## Provenienz
+
+DomainProvenance verknüpft jedes erzeugte Objekt mit allen beteiligten
+RawImportRecords, ImportSessions und dem TransformationRun.
+
+## Review-Fälle
+
+Unbekannte Assets, uneindeutige Paare, unbekannte Earn-/Staking-Fälle,
+ungültige Vorzeichen, Kostenabweichungen und ungesicherte Ledger-Gruppen werden
+nicht geraten, sondern strukturiert zur Review vorgelegt.
 
 ## Akzeptanzkriterien
 
-- Ledger und Trades werden ohne Dateinamenheuristik erkannt.
-- Alle Zeilen sind gültig oder es findet keine Persistenz statt.
-- Zeitwerte sind aware UTC; Finanzwerte verwenden ausschließlich `Decimal`.
-- LF/CRLF, BOM und Dateiname ändern bei gleichen Records den Hash nicht.
-- Ledger und Trades besitzen getrennte Idempotenzräume.
-- Es entstehen keine steuerlichen Domainobjekte.
+- jeder geprüfte Rohdatensatz besitzt genau eine Entscheidung;
+- Wiederholung derselben Version erzeugt keine doppelten Projektionen;
+- Konflikte überschreiben keine vorhandenen Fakten;
+- alle Mengen verwenden Decimal und alle Zeiten aware UTC;
+- der Lauf ist atomar und fachliche Reviews führen nicht zum Rollback;
+- Domain und Application bleiben frei von Kraken und SQLAlchemy.
 
 ## Tests
 
-Erkennung, CSV-Technik, Kraken-Zeilen, Fehleraggregation, Atomarität,
-Idempotenz, Provenienz und Architekturgrenzen werden mit synthetischen Daten
-getestet. Pytest erzwingt 100 Prozent Backend-Coverage.
+Synthetische Tests decken Assets, Paare, Rewards, interne Bewegungen, Trades,
+Ledger-only-Gruppen, Gebühren, Reconciliation, Idempotenz, Provenienz,
+Atomarität, Migration und Architekturgrenzen ab. Backend-Coverage bleibt bei
+100 Prozent.
 
 ## Dokumentation
 
-Developer Guide, Architektur- und Importdokumentation, ADR 0009 und
-`docs/sprint-2c-summary.md` beschreiben Vertrag und Grenzen.
+Developer Guide, Architektur, Importdokumentation, ADR 0010 und
+`docs/sprint-2d-summary.md` beschreiben Vertrag, BMF-Bezug und Grenzen.
 
 ## Definition of Done
 
-- Implementierung, Tests und Dokumentation stimmen überein.
-- Alle Repository-Prüfungen einschließlich Alembic und Docker bestehen.
-- Keine Migration und keine Änderung am generischen Hashvertrag sind nötig.
+- Implementierung, Migration, Tests und Dokumentation stimmen überein.
+- Alle Repository-Prüfungen bestehen.
+- Es gibt keine Kursabfrage, FIFO- oder Steuerjournal-Logik.
 
 ## Umgesetzter Stand
 
-Sprint 2C ist umgesetzt. Steuerliche Transformation und dateiübergreifende
-Deduplizierung verbleiben in Sprint 2D.
+Sprint 2D ist umgesetzt. Die Backend-, Migrations-, Frontend-, Dokumentations-,
+Shell-, Compose- und Docker-Prüfungen sind bestanden.

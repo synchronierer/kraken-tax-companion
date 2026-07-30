@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -37,6 +37,25 @@ class SqlAlchemyRawImportRepository(SqlAlchemyRepository[RawImportRecord]):
         )
         return self._session.scalar(statement)
 
+    def list_by_import_sessions(
+        self, import_session_ids: Sequence[UUID]
+    ) -> Sequence[RawImportRecord]:
+        statement = (
+            select(RawImportRecord)
+            .where(raw_import_records.c.import_session_id.in_(import_session_ids))
+            .order_by(
+                raw_import_records.c.created_at,
+                raw_import_records.c.sequence_number,
+            )
+        )
+        return tuple(self._session.scalars(statement))
+
+    def list_by_external_id(self, external_id: str) -> Sequence[RawImportRecord]:
+        statement = select(RawImportRecord).where(
+            raw_import_records.c.external_id == external_id
+        )
+        return tuple(self._session.scalars(statement))
+
 
 class SqlAlchemyImportSessionRepository(SqlAlchemyRepository[ImportSession]):
     def __init__(self, session: Session) -> None:
@@ -63,3 +82,11 @@ class SqlAlchemyAuditRepository(SqlAlchemyRepository[AuditEvent]):
 class SqlAlchemyImportErrorRepository(SqlAlchemyRepository[ImportError]):
     def __init__(self, session: Session) -> None:
         super().__init__(session, ImportError)
+
+
+class SqlAlchemyStableProjectionRepository[EntityT](SqlAlchemyRepository[EntityT]):
+    def find_by_stable_key(self, stable_key: str) -> EntityT | None:
+        stable_attribute: Any = cast(Any, self._model).stable_key
+        return self._session.scalar(
+            select(self._model).where(stable_attribute == stable_key)
+        )

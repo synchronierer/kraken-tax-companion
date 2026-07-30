@@ -2,6 +2,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     Column,
     Enum,
@@ -27,6 +28,26 @@ from app.core.entities import (
     PriceSnapshot,
     RawImportRecord,
     Sale,
+)
+from app.core.transformation import (
+    AcquisitionLot,
+    AcquisitionType,
+    DecisionType,
+    DisposalEvent,
+    DisposalType,
+    DomainProvenance,
+    FeeEvent,
+    ReconciliationStatus,
+    TaxTreatmentHint,
+    TradeExecution,
+    TransformationDecision,
+    TransformationIssue,
+    TransformationRun,
+    TransformationRunSession,
+    TransformationStatus,
+    ValuationMethod,
+    ValuationRequirement,
+    ValuationStatus,
 )
 from app.database.base import mapper_registry
 from app.database.types import ExactDecimal, UtcDateTime
@@ -163,6 +184,275 @@ import_errors = Table(
     Column("affected_record", JSON, nullable=True),
 )
 
+transformation_runs = Table(
+    "transformation_runs",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column("contract_version", String(64), nullable=False),
+    Column("status", Enum(TransformationStatus, native_enum=False), nullable=False),
+    Column("started_at", UtcDateTime(), nullable=False),
+    Column("completed_at", UtcDateTime(), nullable=True),
+    Column("actor_id", String(255), nullable=False),
+    Column("checked_records", Integer, nullable=False),
+    Column("created_objects", Integer, nullable=False),
+    Column("internal_movements", Integer, nullable=False),
+    Column("review_cases", Integer, nullable=False),
+    Column("error_count", Integer, nullable=False),
+    Column("error_summary", String(1024), nullable=True),
+    Column("created_at", UtcDateTime(), nullable=False),
+    CheckConstraint(
+        "checked_records >= 0 AND created_objects >= 0 "
+        "AND internal_movements >= 0 AND review_cases >= 0 "
+        "AND error_count >= 0",
+        name="ck_transformation_run_counts_non_negative",
+    ),
+)
+
+transformation_run_sessions = Table(
+    "transformation_run_sessions",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "transformation_run_id",
+        UUID,
+        ForeignKey("transformation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "import_session_id",
+        UUID,
+        ForeignKey("import_sessions.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    UniqueConstraint(
+        "transformation_run_id",
+        "import_session_id",
+        name="uq_transformation_run_session",
+    ),
+)
+
+transformation_decisions = Table(
+    "transformation_decisions",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "raw_import_record_id",
+        UUID,
+        ForeignKey("raw_import_records.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    import_reference(),
+    Column(
+        "transformation_run_id",
+        UUID,
+        ForeignKey("transformation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("contract_version", String(64), nullable=False),
+    Column("decision_type", Enum(DecisionType, native_enum=False), nullable=False),
+    Column("reason_code", String(128), nullable=False),
+    Column("explanation", String(1024), nullable=False),
+    Column("domain_object_id", UUID, nullable=True),
+    Column("decided_at", UtcDateTime(), nullable=False),
+    UniqueConstraint(
+        "transformation_run_id",
+        "raw_import_record_id",
+        name="uq_transformation_decision_run_raw",
+    ),
+)
+
+transformation_issues = Table(
+    "transformation_issues",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "transformation_run_id",
+        UUID,
+        ForeignKey("transformation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "raw_import_record_id",
+        UUID,
+        ForeignKey("raw_import_records.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("code", String(128), nullable=False),
+    Column("message", String(1024), nullable=False),
+    Column("is_conflict", Boolean, nullable=False),
+    Column("occurred_at", UtcDateTime(), nullable=False),
+)
+
+
+def projection_columns() -> list[Column[Any]]:
+    return [
+        Column("id", UUID, primary_key=True),
+        Column("stable_key", String(512), nullable=False, unique=True),
+        Column("payload_hash", String(64), nullable=False),
+        Column("external_id", String(255), nullable=False),
+        Column("transformation_version", String(64), nullable=False),
+        Column("provider", String(64), nullable=False),
+        Column("occurred_at", UtcDateTime(), nullable=False),
+        Column("created_at", UtcDateTime(), nullable=False),
+    ]
+
+
+acquisition_lots = Table(
+    "acquisition_lots",
+    mapper_registry.metadata,
+    *projection_columns(),
+    Column("asset_raw_code", COIN, nullable=False),
+    Column("asset_code", COIN, nullable=False),
+    Column("asset_mapping_version", String(64), nullable=False),
+    Column("quantity", AMOUNT, nullable=False),
+    Column(
+        "acquisition_type",
+        Enum(AcquisitionType, native_enum=False),
+        nullable=False,
+    ),
+    Column("account_scope", String(64), nullable=False),
+    Column("wallet_scope", String(64), nullable=False),
+    Column(
+        "valuation_status", Enum(ValuationStatus, native_enum=False), nullable=False
+    ),
+    Column(
+        "tax_treatment_hint", Enum(TaxTreatmentHint, native_enum=False), nullable=False
+    ),
+    Column("native_consideration_asset", COIN, nullable=True),
+    Column("native_consideration_quantity", AMOUNT, nullable=True),
+    Column("fee_quantity", AMOUNT, nullable=False),
+    Column("fee_asset", COIN, nullable=True),
+    Column("gross_quantity", AMOUNT, nullable=True),
+    CheckConstraint("quantity > 0", name="ck_acquisition_quantity_positive"),
+    CheckConstraint("fee_quantity >= 0", name="ck_acquisition_fee_non_negative"),
+)
+
+trade_executions = Table(
+    "trade_executions",
+    mapper_registry.metadata,
+    *projection_columns(),
+    Column("order_external_id", String(255), nullable=False),
+    Column("raw_pair", String(64), nullable=False),
+    Column("base_asset_raw", COIN, nullable=False),
+    Column("base_asset", COIN, nullable=False),
+    Column("quote_asset_raw", COIN, nullable=False),
+    Column("quote_asset", COIN, nullable=False),
+    Column("side", String(16), nullable=False),
+    Column("order_type", String(32), nullable=False),
+    Column("volume", AMOUNT, nullable=False),
+    Column("price", AMOUNT, nullable=False),
+    Column("cost", AMOUNT, nullable=False),
+    Column("fee", AMOUNT, nullable=False),
+    Column("fee_asset", COIN, nullable=True),
+    Column(
+        "reconciliation_status",
+        Enum(ReconciliationStatus, native_enum=False),
+        nullable=False,
+    ),
+    CheckConstraint("volume > 0", name="ck_trade_volume_positive"),
+    CheckConstraint("price > 0", name="ck_trade_price_positive"),
+    CheckConstraint("cost > 0", name="ck_trade_cost_positive"),
+    CheckConstraint("fee >= 0", name="ck_trade_fee_non_negative"),
+)
+
+disposal_events = Table(
+    "disposal_events",
+    mapper_registry.metadata,
+    *projection_columns(),
+    Column("asset_raw_code", COIN, nullable=False),
+    Column("asset_code", COIN, nullable=False),
+    Column("asset_mapping_version", String(64), nullable=False),
+    Column("quantity", AMOUNT, nullable=False),
+    Column("disposal_type", Enum(DisposalType, native_enum=False), nullable=False),
+    Column("account_scope", String(64), nullable=False),
+    Column("wallet_scope", String(64), nullable=False),
+    Column(
+        "valuation_status", Enum(ValuationStatus, native_enum=False), nullable=False
+    ),
+    Column(
+        "tax_treatment_hint", Enum(TaxTreatmentHint, native_enum=False), nullable=False
+    ),
+    Column("native_consideration_asset", COIN, nullable=True),
+    Column("native_consideration_quantity", AMOUNT, nullable=True),
+    Column("fee_quantity", AMOUNT, nullable=False),
+    Column("fee_asset", COIN, nullable=True),
+    Column("fifo_status", String(32), nullable=False),
+    Column(
+        "trade_execution_id",
+        UUID,
+        ForeignKey("trade_executions.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    CheckConstraint("quantity > 0", name="ck_disposal_quantity_positive"),
+    CheckConstraint("fee_quantity >= 0", name="ck_disposal_fee_non_negative"),
+)
+
+fee_events = Table(
+    "fee_events",
+    mapper_registry.metadata,
+    *projection_columns(),
+    Column("asset_code", COIN, nullable=False),
+    Column("quantity", AMOUNT, nullable=False),
+    Column(
+        "valuation_status", Enum(ValuationStatus, native_enum=False), nullable=False
+    ),
+    Column("related_object_id", UUID, nullable=False),
+    CheckConstraint("quantity > 0", name="ck_fee_quantity_positive"),
+)
+
+domain_provenance = Table(
+    "domain_provenance",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column("domain_object_type", String(64), nullable=False),
+    Column("domain_object_id", UUID, nullable=False),
+    Column(
+        "raw_import_record_id",
+        UUID,
+        ForeignKey("raw_import_records.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    import_reference(),
+    Column(
+        "transformation_run_id",
+        UUID,
+        ForeignKey("transformation_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    UniqueConstraint(
+        "domain_object_type",
+        "domain_object_id",
+        "raw_import_record_id",
+        name="uq_domain_provenance_object_raw",
+    ),
+)
+
+valuation_requirements = Table(
+    "valuation_requirements",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column("asset_code", COIN, nullable=False),
+    Column("target_currency", COIN, nullable=False),
+    Column("valuation_at", UtcDateTime(), nullable=False),
+    Column("method", Enum(ValuationMethod, native_enum=False), nullable=False),
+    Column("status", Enum(ValuationStatus, native_enum=False), nullable=False),
+    Column("reason_code", String(128), nullable=False),
+    Column("domain_object_type", String(64), nullable=False),
+    Column("domain_object_id", UUID, nullable=False),
+    Column(
+        "transformation_run_id",
+        UUID,
+        ForeignKey("transformation_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("created_at", UtcDateTime(), nullable=False),
+    UniqueConstraint(
+        "domain_object_type",
+        "domain_object_id",
+        name="uq_valuation_requirement_object",
+    ),
+)
+
 
 def reject_update(_: Mapper[Any], connection: Any, target: object) -> None:
     del connection, target
@@ -179,8 +469,22 @@ def configure_mappings() -> None:
         mapper_registry.map_imperatively(PriceSnapshot, price_snapshots),
         mapper_registry.map_imperatively(RawImportRecord, raw_import_records),
         mapper_registry.map_imperatively(ImportError, import_errors),
+        mapper_registry.map_imperatively(
+            TransformationRunSession, transformation_run_sessions
+        ),
+        mapper_registry.map_imperatively(
+            TransformationDecision, transformation_decisions
+        ),
+        mapper_registry.map_imperatively(TransformationIssue, transformation_issues),
+        mapper_registry.map_imperatively(AcquisitionLot, acquisition_lots),
+        mapper_registry.map_imperatively(DisposalEvent, disposal_events),
+        mapper_registry.map_imperatively(TradeExecution, trade_executions),
+        mapper_registry.map_imperatively(FeeEvent, fee_events),
+        mapper_registry.map_imperatively(DomainProvenance, domain_provenance),
+        mapper_registry.map_imperatively(ValuationRequirement, valuation_requirements),
     ]
     mapper_registry.map_imperatively(ImportSession, import_sessions)
+    mapper_registry.map_imperatively(TransformationRun, transformation_runs)
     mapper_registry.map_imperatively(Sale, sales)
     mapper_registry.map_imperatively(Configuration, configurations)
     for mapper in immutable_mappers:

@@ -5,8 +5,9 @@
 The import engine preserves external JSON as immutable evidence. It is generic,
 transactional, auditable, and independent of any exchange or transport.
 
-Sprint 2C still ends at raw persistence. It performs no domain transformation,
-tax calculation, FIFO allocation, pricing, or recommendation.
+Raw import still ends at immutable persistence. Sprint 2D invokes a separate
+explicit transformation service; import itself performs no domain
+transformation, tax calculation, FIFO allocation, pricing, or recommendation.
 
 ## Supported Sources
 
@@ -128,7 +129,32 @@ Kraken Ledger and Trades use the separate sources `kraken-ledgers` and
 `kraken-trades`. External IDs are `kraken:ledger:<txid>` and
 `kraken:trade:<txid>`. Duplicate `txid` values in one file are invalid; equal
 `ordertxid` values are valid for multiple trade executions. Different batches
-may retain the same external ID. Cross-file deduplication follows in Sprint 2D.
+may retain the same external ID. Cross-file deduplication is handled by the
+separate Sprint-2D transformation contract.
+
+## Fachliche Transformation
+
+Ein `TransformationRun` wählt eine oder mehrere abgeschlossene ImportSessions.
+Für jeden RawImportRecord wird genau eine Entscheidung gespeichert:
+Fachereignis, interne Bewegung, Review, Unsupported, Duplikat oder Konflikt.
+Keine Entscheidung wird aus einem freien Fehlermeldungstext abgeleitet.
+
+Die Kraken-Transformation erkennt positive `earn/reward`- und konservativ
+eindeutige Legacy-`staking`-Rewards. Interne Allocation- und
+Spot-/Staking-Bewegungen erzeugen keine Erwerbe. Trades bleiben je `txid`
+getrennt und erzeugen providerneutrale Trades, Erwerbe, gegebenenfalls
+Veräußerungen und Gebühren. Ledger-only spend/receive wird ausschließlich über
+eine gemeinsame stabile Referenz gruppiert.
+
+Der Stable Key enthält Provider, externe ID, Ereignistyp und
+Transformationsversion. Gleiche Evidenz wird als Duplikat entschieden,
+abweichende Evidenz als Konflikt. Eine neue Version ist die einzige
+kontrollierte Neu-Projektion. `DomainProvenance` bewahrt alle Raw- und
+Session-Verknüpfungen.
+
+Unbekannte Assets und Paare werden nicht geraten. Bewertungsvormerkungen
+enthalten EUR, Zeitpunkt und `DAILY_AVERAGE`, aber keinen erfundenen Kurs.
+Direkte EUR-Kosten und -Erlöse bleiben native Kraken-Werte.
 
 ## Immutable Storage
 

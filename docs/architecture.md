@@ -14,7 +14,8 @@ Raw Layer -> Domain Layer -> Tax Layer -> Presentation Layer
 
 The Raw Layer preserves external evidence. The Domain Layer represents neutral
 economic facts. Future layers may consume those facts but never mutate sources.
-Sprint 2C still operates only in the Raw and Audit layers.
+Sprint 2D adds the provider-neutral Domain Layer while keeping valuation and
+the Tax Layer separate.
 
 ## Import Pipeline
 
@@ -45,6 +46,31 @@ raw records into domain entities.
 `app/adapters/kraken/` contains the Kraken schema contract, immutable parser
 DTOs, and application orchestration. The generic import core and domain do not
 import this package. The parser uses neither SQLAlchemy nor router or UI code.
+
+## Transformation Pipeline
+
+```text
+RawImportRecord
+      |
+      v
+Kraken interpretation boundary
+      |
+      v
+TransformationDecision + provider-neutral facts
+      |
+      v
+DomainProvenance + ValuationRequirement
+```
+
+`TransformationRun` owns a versioned atomic projection over one or more import
+sessions. Every selected raw record receives exactly one decision. Stable
+projection keys prevent duplicates across overlapping exports; conflicts and
+unknown classifications are persisted for review instead of guessed.
+
+Asset and pair knowledge is confined to the Kraken boundary and uses only an
+explicit versioned alias register. Domain facts retain raw and canonical asset
+codes. Trade, acquisition, disposal and fee facts remain distinct so later
+valuation and FIFO can consume them without rewriting source evidence.
 
 ## Backend
 
@@ -123,6 +149,8 @@ the original idempotency constraint, and import errors without seed data.
 Revision `0003_import_batch_model` adds persistent batch hashes, error
 summaries, ordered record metadata, and replaces record-content uniqueness
 with session-position uniqueness.
+Revision `0004_domain_transformation` adds runs, decisions, issues, economic
+facts, valuation requests and full raw-to-domain provenance.
 
 ## Frontend
 
@@ -152,7 +180,7 @@ idempotency, rollback, audit creation, exact persistence, and migrations.
 - Application services depend on domain ports.
 - Persistence depends on domain entities, never the reverse.
 - Import adapters depend on the generic import boundary.
-- Raw evidence may produce facts later; facts never rewrite evidence.
+- Raw evidence produces versioned facts; facts never rewrite evidence.
 - The future Tax Layer may only consume Domain Layer facts.
 
 ## Deployment

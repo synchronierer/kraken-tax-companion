@@ -84,6 +84,26 @@ Ledger- und Trade-Exporte vollständig, bevor er geordnete `RawRecordInput`
 übergibt. Parser und DTOs besitzen keine SQLAlchemy-, API- oder steuerliche
 Abhängigkeit.
 
+## Raw-to-Domain-Transformation
+
+Sprint 2D ergänzt einen expliziten `TransformationRun`. Der Kraken-Rand
+klassifiziert RawImportRecords, während `TradeExecution`, `AcquisitionLot`,
+`DisposalEvent`, `FeeEvent`, Entscheidungen, Issues und
+Bewertungsanforderungen providerneutral bleiben. Jeder geprüfte Rohdatensatz
+erhält genau eine Entscheidung; `DomainProvenance` kann mehrere Rohdatensätze
+mit einem Fachobjekt verbinden.
+
+Assetcodes werden nur über das versionierte Aliasregister aufgelöst. Unbekannte
+Codes und uneindeutige Paare bleiben als Review-Fall erhalten. Projektionen
+verwenden einen Stable Key aus Provider, externer ID, Ereignistyp und
+Vertragsversion. Eine Wiederholung erzeugt keine Duplikate, ein abweichender
+Payload einen Konflikt. Eine Korrektur verwendet neue Evidenz und eine
+explizit neue Transformationsversion.
+
+Bewertungsanforderungen speichern nur Auftrag, Zielwährung, Zeitpunkt und
+Methode. Sprint 2D fragt keine Kurse ab und enthält weder Steuerjournal noch
+FIFO.
+
 ## Repository und Unit of Work
 
 Domain-Protokolle definieren Lese- und Schreiboperationen. Application-Dienste
@@ -183,6 +203,7 @@ Weitere Leitlinien:
 - [Coding Rules](../CODING_RULES.md)
 - [Contributing](../CONTRIBUTING.md)
 - [Sprint 2C](../SPRINT.md)
+- [Sprint 2D](sprint-2d-summary.md)
 - [Architektur](architecture.md)
 - [Import Engine](import.md)
 - [Architecture Decision Records](adr/)

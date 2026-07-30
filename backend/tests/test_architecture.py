@@ -61,3 +61,22 @@ def test_kraken_adapter_respects_dependency_boundaries() -> None:
     assert "kraken" not in core_sources.lower()
     assert "app.adapters.kraken" not in import_sources
     assert "sqlalchemy" not in parser_source.lower()
+
+
+def test_transformation_architecture_has_no_forbidden_tax_layers() -> None:
+    app_root = Path(__file__).parents[1] / "app"
+    core_sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in (app_root / "core").glob("*.py")
+    )
+    transformation_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (app_root / "transformations").glob("*.py")
+    )
+    kraken_mapper = (app_root / "adapters" / "kraken" / "transformation.py").read_text(
+        encoding="utf-8"
+    )
+    assert "sqlalchemy" not in core_sources.lower()
+    assert "app.adapters.kraken" not in transformation_sources
+    assert "price_snapshot" not in kraken_mapper.lower()
+    assert "fifo_status=" not in kraken_mapper.lower()
+    assert "taxjournal" not in kraken_mapper.lower()

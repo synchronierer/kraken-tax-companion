@@ -7,7 +7,7 @@ from app.database.session import get_session
 
 def test_metadata_contains_domain_tables() -> None:
     models.configure_mappings()
-    assert len(Base.metadata.tables) == 8
+    assert len(Base.metadata.tables) == 18
 
 
 def test_session_dependency_provides_session() -> None:

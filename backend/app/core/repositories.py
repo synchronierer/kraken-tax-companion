@@ -10,6 +10,18 @@ from app.core.entities import (
     RawImportRecord,
     Sale,
 )
+from app.core.transformation import (
+    AcquisitionLot,
+    DisposalEvent,
+    DomainProvenance,
+    FeeEvent,
+    TradeExecution,
+    TransformationDecision,
+    TransformationIssue,
+    TransformationRun,
+    TransformationRunSession,
+    ValuationRequirement,
+)
 
 EntityT = TypeVar("EntityT")
 
@@ -43,6 +55,12 @@ class RawImportRepository(Repository[RawImportRecord], Protocol):
         self, source: str, content_hash: str
     ) -> RawImportRecord | None: ...
 
+    def list_by_import_sessions(
+        self, import_session_ids: Sequence[UUID]
+    ) -> Sequence[RawImportRecord]: ...
+
+    def list_by_external_id(self, external_id: str) -> Sequence[RawImportRecord]: ...
+
 
 class AuditRepository(Repository[AuditEvent], Protocol):
     pass
@@ -54,3 +72,49 @@ class ImportErrorRepository(Repository[ImportError], Protocol):
 
 RawImportRecordRepository = RawImportRepository
 AuditEventRepository = AuditRepository
+
+
+class StableProjectionRepository[EntityT](Repository[EntityT], Protocol):
+    def find_by_stable_key(self, stable_key: str) -> EntityT | None: ...
+
+
+class AcquisitionRepository(StableProjectionRepository[AcquisitionLot], Protocol):
+    pass
+
+
+class DisposalRepository(StableProjectionRepository[DisposalEvent], Protocol):
+    pass
+
+
+class TradeExecutionRepository(StableProjectionRepository[TradeExecution], Protocol):
+    pass
+
+
+class FeeEventRepository(StableProjectionRepository[FeeEvent], Protocol):
+    pass
+
+
+class TransformationRunRepository(Repository[TransformationRun], Protocol):
+    pass
+
+
+class TransformationDecisionRepository(Repository[TransformationDecision], Protocol):
+    pass
+
+
+class TransformationIssueRepository(Repository[TransformationIssue], Protocol):
+    pass
+
+
+class TransformationRunSessionRepository(
+    Repository[TransformationRunSession], Protocol
+):
+    pass
+
+
+class DomainProvenanceRepository(Repository[DomainProvenance], Protocol):
+    pass
+
+
+class ValuationRequirementRepository(Repository[ValuationRequirement], Protocol):
+    pass

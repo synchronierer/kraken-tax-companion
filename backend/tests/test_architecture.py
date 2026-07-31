@@ -80,3 +80,37 @@ def test_transformation_architecture_has_no_forbidden_tax_layers() -> None:
     assert "price_snapshot" not in kraken_mapper.lower()
     assert "fifo_status=" not in kraken_mapper.lower()
     assert "taxjournal" not in kraken_mapper.lower()
+
+
+def test_sprint_3a_layer_boundaries_and_non_goals() -> None:
+    root = Path(__file__).parents[1]
+    app_root = root / "app"
+    core_sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in (app_root / "core").glob("*.py")
+    ).lower()
+    router_source = (app_root / "api" / "workflows.py").read_text(encoding="utf-8")
+    infrastructure_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (app_root / "infrastructure").glob("*.py")
+    ).lower()
+    frontend_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (root.parent / "frontend" / "src").glob("*.*")
+    )
+
+    for forbidden in ("fastapi", "sqlalchemy", "httpx", "coingecko"):
+        assert forbidden not in core_sources
+    assert "quantity * unit_price" not in router_source
+    assert "react" not in infrastructure_sources
+    assert "dangerouslySetInnerHTML" not in frontend_sources
+    assert "eur_value =" not in frontend_sources
+    for deferred_feature in ("fifo(", "tax_journal", "execute_sale"):
+        assert deferred_feature not in (core_sources + frontend_sources.lower())
+
+
+def test_database_session_initializes_imperative_mappings_centrally() -> None:
+    session_source = (
+        Path(__file__).parents[1] / "app" / "database" / "session.py"
+    ).read_text(encoding="utf-8")
+    assert "configure_mappings()" in session_source
+    assert "from app.database.mappings import configure_mappings" in session_source

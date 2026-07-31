@@ -137,9 +137,13 @@ import workers remain disabled until ADR 0008's atomic claim is implemented.
 
 ### PostgreSQL Migration Path
 
-The Decimal adapter selects `NUMERIC(38,18)` for PostgreSQL. Portable UUID,
-JSON, foreign-key, enum, and constraint definitions avoid SQLite-specific
-application logic.
+The Decimal adapter selects `NUMERIC(38,18)` for PostgreSQL. `UtcDateTime`
+selects `TIMESTAMP WITH TIME ZONE`, while its SQLite representation remains
+compatible with the local database and both paths enforce aware UTC values at
+the Python boundary. A central structured-data type selects PostgreSQL `JSONB`
+and SQLite `JSON`; mappings and migrations share this dialect contract.
+Portable UUID, foreign-key, enum, and constraint definitions avoid
+SQLite-specific application logic.
 
 ### Alembic
 
@@ -151,11 +155,36 @@ summaries, ordered record metadata, and replaces record-content uniqueness
 with session-position uniqueness.
 Revision `0004_domain_transformation` adds runs, decisions, issues, economic
 facts, valuation requests and full raw-to-domain provenance.
+Revision `0005_eur_valuation` adds immutable valuation evidence and aligns the
+single JSON column introduced by revision 0003 with the PostgreSQL `JSONB`
+contract. Alembic uses a narrow custom comparison only for the physical
+representation of `UtcDateTime`: PostgreSQL `timezone=True` is equivalent,
+whereas `timezone=False` and unrelated type changes continue to produce drift.
 
 ## Frontend
 
-The React shell remains a presentation-only consumer. Routes remain
-placeholders and no import interface is added in Sprint 2C.
+Die React-Anwendung ist ein Präsentations-Consumer der versionierten REST-API.
+Sprint 3A ergänzt den vertikalen Import-, Transformations- und
+Bewertungsworkflow. Fachliche Berechnungen verbleiben im Backend.
+
+## Bewertungspipeline
+
+`ValuationRequirement` wird durch einen atomaren `ValuationRun` aufgelöst.
+Application-Code hängt am `HistoricalPriceProvider`; CoinGecko und HTTP liegen
+in Infrastructure. Normalisierte Beobachtungen ergeben unveränderliche
+Tagespreise und versionierte Entscheidungen. Manuelle Nachweise bleiben neben
+automatischer Evidenz erhalten.
+
+Die eigenständige Provider-Evidenz liegt zwischen HTTP-Adapter und Tagespreis.
+Sie speichert nur begrenzte normalisierte Beobachtungen und keine geheimen
+Requestdaten.
+
+Tagespreise und Bewertungsentscheidungen sind append-only. Duplikate werden
+erkannt; Korrekturen und neue Methoden- oder Providervertragsversionen
+erzeugen Nachfolger mit `supersedes_id`. API-Details bilden die Kette von
+ImportSession über Rohdatensatz, Transformation und Domainobjekt bis zu
+Requirement, Evidenz, Tagespreis, Entscheidung und Audit ab. Fehlende
+optionale Glieder bleiben ausdrücklich `null` oder leer.
 
 ## Cross-Cutting Concerns
 
@@ -187,3 +216,10 @@ idempotency, rollback, audit creation, exact persistence, and migrations.
 
 Docker Compose runs the backend and frontend with persistent data, log, and
 export volumes.
+
+Auch Versionen folgen dieser Grenze: Die Berechnungsversion ist
+providerneutral im Core definiert, während Provider-Vertrag und
+Asset-Mappingversion Eigentum des konkreten Infrastructure-Adapters sind.
+Import und optionale Direkttransformation verwenden dieselbe requestgebundene
+Unit-of-Work-Factory, sodass API-Dependency-Overrides und Produktionszugriffe
+garantiert denselben Datenbankkontext sehen.

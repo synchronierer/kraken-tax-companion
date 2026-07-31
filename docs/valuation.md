@@ -1,0 +1,54 @@
+# EUR-Bewertung
+
+Die Bewertungsengine trennt Tatsachen, Kursnachweise und Entscheidungen vom
+späteren Steuerjournal. Sie erteilt keine individuelle Steuerberatung.
+
+Native EUR-Gegenleistungen werden unverändert übernommen. Andere Ereignisse
+verwenden das arithmetische Mittel aller gültigen stündlichen CoinGecko-Punkte
+des abgeschlossenen UTC-Tags. Unter 20 Punkten entsteht ein Prüffall. Mengen,
+Kurse und Ergebnisse bleiben `Decimal`; Centdarstellungen verwenden erst an
+der Anzeigegrenze `ROUND_HALF_UP`.
+
+Auch native EUR-Tatsachen durchlaufen die vollständige Bewertungskette. Ein
+Trade gegen EUR erzeugt ein `ValuationRequirement` mit `DIRECT_EUR`; erst der
+`ValuationRun` erzeugt daraus die unveränderliche Entscheidung
+`NATIVE_EUR`. Für den Kauf von 0,5 BTC zu insgesamt 20.000 EUR bleiben damit
+Stückpreis 40.000 EUR/BTC und Gesamtwert 20.000 EUR exakt nachvollziehbar.
+Direkte EUR-Gebühren werden nach demselben Vertrag mit ihrem EUR-Nennwert
+bewertet. Native Entscheidungen benötigen weder Tagespreis noch
+Provider-Evidenz und lösen niemals einen Providerabruf aus.
+
+Der Provider-Port kennt nur normalisierte Beobachtungen. Das versionierte
+CoinGecko-Register enthält zunächst `BTC -> bitcoin` und `ETH -> ethereum`.
+Unbekannte Assets werden nicht geraten. Provider-Evidenz wird normalisiert,
+gehasht und ohne geheime Header gespeichert.
+
+`provider_evidence` bewahrt Provider- und Vertragskennung, explizite
+Provider-Asset-ID, Zielwährung, UTC-Anfragefenster, HTTP-Status, Abrufzeit,
+kanonischen Hash und normalisierte Beobachtungen als Zeit- und Decimalstrings.
+Tageskurs und Bewertungsentscheidung referenzieren diesen unveränderlichen
+Nachweis eindeutig. Weder Header noch API-Schlüssel werden persistiert.
+
+Manuelle Tageskurse erfordern Asset, UTC-Datum, positiven EUR-Kurs, Quelle,
+Begründung und Akteur. Korrekturen erzeugen eine neue Version und löschen
+automatische Evidenz nicht. Diese Nachweisstrategie berücksichtigt sachlich
+die Dokumentations- und Konsistenzanforderungen des BMF-Schreibens vom
+6. März 2025.
+
+Identische manuelle Evidenz wird als Duplikat protokolliert. Eine Korrektur
+erzeugt eine neue Tagespreisversion mit `supersedes_id`; der historische Satz
+wird nicht geändert. Bewertungsentscheidungen werden bei einer neuen
+Methodenversion ebenso fortgeschrieben. Listen und Details leiten den
+effektiven Status `superseded` aus der unveränderlichen Nachfolgeverknüpfung
+ab. Manuelle Tagespreise haben für dasselbe Asset und denselben UTC-Tag
+Vorrang, ohne vorhandene automatische Evidenz zu löschen.
+
+CoinGecko-Abrufe werden in höchstens 90 Tage große Fenster geteilt. Der
+persistente Tagespreis-Cache verhindert unnötige Wiederholungen. Bewusst
+erneut geladene, abweichende Evidenz wird als neue Version und Konflikt
+auditiert; identische Evidenz erzeugt keinen zweiten Nachweis.
+Die Domain definiert ausschließlich die providerneutrale Berechnungs- und
+Methodenversion. Providername, Asset-Mappingversion und die konkrete
+Provider-Vertragsversion liegen im Infrastructure-Adapter und werden erst mit
+der unveränderlichen ProviderEvidence persistiert. Damit kennt der Core weder
+CoinGecko noch dessen IDs oder HTTP-Vertrag.

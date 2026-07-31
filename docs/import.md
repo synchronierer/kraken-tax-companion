@@ -200,3 +200,33 @@ Tests verify deterministic hashing, key-order independence, content changes,
 validation, lifecycle transitions, duplicate suppression, audit creation,
 rollback, failure evidence, repositories, unit-of-work behavior, and Alembic
 migrations.
+
+## REST-Upload in Sprint 3A
+
+`POST /api/imports/kraken` verwendet unverändert den Kraken-CSV-Adapter und die
+generische Engine. `transform=true` startet danach den getrennt auditierten
+Transformationsdienst. Dateityp und Größe werden bereits an der HTTP-Grenze
+begrenzt; Parserfehler behalten Zeile, Feld und stabilen Code.
+
+Die manuelle Kurs-CSV verwendet
+`asset,date,price_eur,source,reason`, UTF-8 beziehungsweise UTF-8-BOM und
+einen Punkt als Dezimaltrennzeichen. Sie wird vollständig vor dem Commit
+validiert. Fehler nennen Zeile und Feld; eine ungültige Zeile verwirft den
+gesamten Import ohne Teilpersistenz.
+
+Die Importantwort enthält dabei optional `transformation` mit Run-ID, Status,
+geprüften Datensätzen, Prüffällen und erzeugten Bewertungsanforderungen. Bei
+einem identischen erneuten Import wird eine bereits erfolgreiche
+Transformation derselben ImportSession referenziert. Existiert noch keine
+erfolgreiche Transformation, wird sie auch für den als Duplikat erkannten
+Import kontrolliert ausgeführt. Ohne `transform=true` entstehen weder
+Domainobjekte noch Bewertungsanforderungen.
+
+Die Importengine bewahrt bei einem Duplikat sowohl die neue, auditierbare
+ImportSession des Versuchs als auch den Verweis auf die ursprüngliche Session.
+Für die Direkttransformation gilt als Idempotenzschlüssel die ursprüngliche
+ImportSession zusammen mit der Transformationsvertragsversion. Ein bereits
+erfolgreicher Lauf dieses Schlüssels wird unverändert wiederverwendet; seine
+Run-ID und Zusammenfassung werden rekonstruiert. Fehlgeschlagene Läufe gelten
+nicht als wiederverwendbarer Erfolg, und eine neue Vertragsversion darf einen
+neuen Lauf erzeugen.

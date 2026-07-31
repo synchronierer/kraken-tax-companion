@@ -7,8 +7,12 @@ services:
       APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
       APP_DATABASE_URL: ${APP_DATABASE_URL:-sqlite:////data/kraken-tax-companion.db}
       APP_CORS_ORIGINS: '${APP_CORS_ORIGINS:-["http://localhost:5173"]}'
+      APP_COINGECKO_BASE_URL: ${APP_COINGECKO_BASE_URL:-https://api.coingecko.com/api/v3}
+      APP_COINGECKO_API_MODE: ${APP_COINGECKO_API_MODE:-disabled}
+      APP_COINGECKO_API_KEY: ${APP_COINGECKO_API_KEY:-}
+      APP_COINGECKO_TIMEOUT_SECONDS: ${APP_COINGECKO_TIMEOUT_SECONDS:-15}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - database:/data
       - logs:/logs
@@ -29,9 +33,9 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     ports:
-      - "5173:80"
+      - "${FRONTEND_PORT:-5173}:80"
     depends_on:
       backend:
         condition: service_healthy

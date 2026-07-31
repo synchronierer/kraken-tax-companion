@@ -618,7 +618,16 @@ class KrakenTransformationService:
             "transformation.acquisition_created",
             {"acquisition_id": str(acquisition.id)},
         )
-        if not direct_eur:
+        if direct_eur:
+            self._valuation(
+                unit,
+                run,
+                acquisition,
+                "native_eur_trade_acquisition",
+                counters,
+                method=ValuationMethod.DIRECT_EUR,
+            )
+        else:
             self._valuation(unit, run, acquisition, "trade_acquisition", counters)
         if paid_asset.canonical_code not in FIAT_ASSETS:
             disposal = DisposalEvent(
@@ -654,7 +663,16 @@ class KrakenTransformationService:
                 "transformation.disposal_created",
                 {"disposal_id": str(disposal.id)},
             )
-            if disposal.valuation_status is ValuationStatus.VALUATION_REQUIRED:
+            if disposal.valuation_status is ValuationStatus.NATIVE_EUR_AVAILABLE:
+                self._valuation(
+                    unit,
+                    run,
+                    disposal,
+                    "native_eur_trade_disposal",
+                    counters,
+                    method=ValuationMethod.DIRECT_EUR,
+                )
+            else:
                 self._valuation(unit, run, disposal, "trade_disposal", counters)
         if fee > 0:
             fee_event = FeeEvent(
@@ -682,7 +700,16 @@ class KrakenTransformationService:
                 "transformation.fee_created",
                 {"fee_id": str(fee_event.id)},
             )
-            if fee_event.valuation_status is ValuationStatus.VALUATION_REQUIRED:
+            if fee_event.valuation_status is ValuationStatus.NATIVE_EUR_AVAILABLE:
+                self._valuation(
+                    unit,
+                    run,
+                    fee_event,
+                    "native_eur_trade_fee",
+                    counters,
+                    method=ValuationMethod.DIRECT_EUR,
+                )
+            else:
                 self._valuation(unit, run, fee_event, "trade_fee", counters)
         self._audit(
             unit, run, "transformation.trade_created", {"trade_id": str(trade.id)}
@@ -830,13 +857,15 @@ class KrakenTransformationService:
         entity: AcquisitionLot | DisposalEvent | FeeEvent,
         reason: str,
         counters: _Counters,
+        *,
+        method: ValuationMethod = ValuationMethod.DAILY_AVERAGE,
     ) -> None:
         unit.valuation_requirements.add(
             ValuationRequirement(
                 asset_code=entity.asset_code,
                 target_currency="EUR",
                 valuation_at=entity.occurred_at,
-                method=ValuationMethod.DAILY_AVERAGE,
+                method=method,
                 status=ValuationStatus.VALUATION_REQUIRED,
                 reason_code=reason,
                 domain_object_type=type(entity).__name__,

@@ -55,13 +55,15 @@ mypy backend/app
 pytest backend
 npm --prefix frontend run lint
 npm --prefix frontend run typecheck
+npm --prefix frontend test
 npm --prefix frontend run build
 npx --yes markdownlint-cli2 "**/*.md" "#frontend/node_modules"
 ```
 
 MyPy läuft durch `backend/pyproject.toml` im Strict-Modus. Pytest erzwingt dort
 100 Prozent Coverage für `app`; ein separates Coverage-Kommando ist daher
-nicht nötig. Das Frontend definiert derzeit kein Testskript.
+nicht nötig. Der Frontend-Testbefehl führt reproduzierbare Node-basierte
+Vertrags- und Verhaltensprüfungen aus.
 
 Container werden ohne Änderung des Laufzeitverhaltens gebaut:
 

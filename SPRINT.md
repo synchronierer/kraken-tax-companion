@@ -1,102 +1,60 @@
-# Sprint 2D – Transformation von Kraken-Rohdaten in fachliche Ereignisse
+# Sprint 3A – EUR-Bewertungsengine und erste funktionsfähige Web-UI
 
-## Ziel
+## Ziel und sichtbares Nutzerergebnis
 
-Revisionssicher importierte Kraken-Rohdaten werden atomar, idempotent und
-nachvollziehbar in providerneutrale wirtschaftliche Fakten transformiert.
+Kraken-CSV-Evidenz wird importiert, in fachliche Vorgänge transformiert und
+mit nachvollziehbaren EUR-Kursen bewertet. Die deutsche Weboberfläche zeigt
+den gesamten Ablauf ohne Mockdaten.
 
-## Ausgangslage
+## Ausgangslage und Scope
 
-Sprint 2C bewahrt Ledger- und Trade-CSV-Zeilen unverändert mit externer
-Kraken-ID, ImportSession, Hash und technischen Metadaten auf.
+Sprint 2D liefert unveränderliche Rohdaten, Fachereignisse, Provenienz und
+Bewertungsanforderungen. Sprint 3A ergänzt Kursquellen, die providerneutrale
+EUR-Bewertung, manuelle Tageskurse, REST-API, Übersicht, Importe, Vorgänge,
+Bewertungen, Prüffälle und Systemstatus.
 
-## Scope
+## Bewertungsmethoden und Kursprovider
 
-- explizite Transformationsläufe und eine Entscheidung je RawImportRecord;
-- Earn-/Staking-Rewards und interne Bewegungen;
-- TradeExecution, AcquisitionLot, DisposalEvent und FeeEvent;
-- versionierte Asset-Aliase und konservative Pair-Auflösung;
-- Ledger-/Trade-Abgleich und eindeutig referenzierte Ledger-only-Vorgänge;
-- vollständige Raw-/Session-/Run-Provenienz und Bewertungsvormerkungen;
-- strukturierte Review-, Konflikt-, Duplikat- und Fehlerfälle.
+- `NATIVE_EUR` übernimmt eindeutige EUR-Gegenleistungen ohne Kursabruf.
+- `DAILY_AVERAGE_HOURLY` mittelt gültige Stundenwerte eines abgeschlossenen
+  UTC-Tags; mindestens 20 Werte sind für automatische Auflösung erforderlich.
+- `MANUAL_DAILY_PRICE` ist ein versionierter, begründeter Nachweis.
+- CoinGecko ist der erste Adapter hinter einem austauschbaren Provider-Port.
 
-## Nicht-Ziele
+## Manuelle Kurse, API und UI
 
-Kursabruf, tatsächliche EUR-Bewertung, Steuerjournal, FIFO, Gewinn-/Verlust-,
-Freigrenzen- oder Steuerberechnung, Empfehlungen, Verkäufe, API-Synchronisation
-sowie Web- oder API-Endpunkte bleiben ausgeschlossen.
+Einzel- und CSV-Erfassung stehen neben Import-, Transformations-, Bewertungs-,
+Listen-, Review-, Dashboard- und Systemendpunkten. Navigation und Grundlayout
+sind dauerhaft für Sprint 3B angelegt.
 
-## Transformationsregeln
+## Nicht-Ziele und Abgrenzung zu Sprint 3B
 
-Jeder ausgewählte Rohdatensatz erhält genau eine Entscheidung. Die Identität
-einer Projektion besteht aus Provider, externer Datensatzidentität,
-Ereignistyp und Transformationsversion. Abweichender Payload bei gleicher
-Identität wird als Konflikt gespeichert.
+Sprint 3A enthält weder FIFO noch Haltefrist, Gewinnermittlung, Steuerjournal,
+Jahresabschluss, CSV-Steuerexport oder PDF-Bericht. Sprint 3B ergänzt das
+reviewbare Steuerjournal, konfigurierbare Verbrauchsfolge, Haltefrist und
+Gewinnermittlung, Exporte sowie Jahresfreigabe.
 
-## Reward-Klassifikation
+## Akzeptanzkriterien, Tests und Dokumentation
 
-Positive `earn/reward`-Datensätze und konservativ eindeutige positive
-Legacy-`staking`-Datensätze erzeugen Erwerbe. Brutto, Gebühr und Netto bleiben
-getrennt. `TaxTreatmentHint` ist nur ein überprüfbarer Hinweis, keine
-individuelle Rechtsentscheidung.
-
-## Interne Bewegungen
-
-Allocation, Autoallocation, Deallocation, Migration sowie Spot-/Staking-
-Umbuchungen werden als interne Bewegung entschieden und erzeugen weder Erwerb
-noch Veräußerung.
-
-## Trades
-
-Jede Kraken-`txid` bleibt eine eigene TradeExecution. Buy und Sell erzeugen
-den erhaltenen Erwerb; die Hingabe eines Kryptowerts erzeugt zusätzlich eine
-Veräußerung. Mehrere Ausführungen derselben `ordertxid` bleiben getrennt.
-
-## Gebühren
-
-Tradegebühren werden als FeeEvent gespeichert. Rewardgebühren bleiben als
-Brutto-/Gebühr-/Netto-Bestandteil des Erwerbs nachvollziehbar. Es findet keine
-Gewinnberechnung statt.
-
-## Provenienz
-
-DomainProvenance verknüpft jedes erzeugte Objekt mit allen beteiligten
-RawImportRecords, ImportSessions und dem TransformationRun.
-
-## Review-Fälle
-
-Unbekannte Assets, uneindeutige Paare, unbekannte Earn-/Staking-Fälle,
-ungültige Vorzeichen, Kostenabweichungen und ungesicherte Ledger-Gruppen werden
-nicht geraten, sondern strukturiert zur Review vorgelegt.
-
-## Akzeptanzkriterien
-
-- jeder geprüfte Rohdatensatz besitzt genau eine Entscheidung;
-- Wiederholung derselben Version erzeugt keine doppelten Projektionen;
-- Konflikte überschreiben keine vorhandenen Fakten;
-- alle Mengen verwenden Decimal und alle Zeiten aware UTC;
-- der Lauf ist atomar und fachliche Reviews führen nicht zum Rollback;
-- Domain und Application bleiben frei von Kraken und SQLAlchemy.
-
-## Tests
-
-Synthetische Tests decken Assets, Paare, Rewards, interne Bewegungen, Trades,
-Ledger-only-Gruppen, Gebühren, Reconciliation, Idempotenz, Provenienz,
-Atomarität, Migration und Architekturgrenzen ab. Backend-Coverage bleibt bei
-100 Prozent.
-
-## Dokumentation
-
-Developer Guide, Architektur, Importdokumentation, ADR 0010 und
-`docs/sprint-2d-summary.md` beschreiben Vertrag, BMF-Bezug und Grenzen.
+Decimal und UTC bleiben durchgängig erhalten, Kursnachweise sind unveränderlich
+und versioniert, Secrets verlassen das Backend nicht, Review ersetzt
+Vermutungen. Domain-, Provider-, API-, Migrations- und UI-Verhalten werden
+synthetisch getestet. Architektur, Bewertung, UI, Import und ADR 0011
+dokumentieren den Vertrag.
 
 ## Definition of Done
 
-- Implementierung, Migration, Tests und Dokumentation stimmen überein.
-- Alle Repository-Prüfungen bestehen.
-- Es gibt keine Kursabfrage, FIFO- oder Steuerjournal-Logik.
+Der Sprint ist erst umgesetzt, wenn Backend-, Frontend-, Alembic-, Compose-,
+Docker-, Shell-, Markdown- und Smoke-Prüfungen erfolgreich abgeschlossen sind.
+Der Prüfstatus steht in `docs/sprint-3a-summary.md`.
 
-## Umgesetzter Stand
+## Abschlussstatus
 
-Sprint 2D ist umgesetzt. Die Backend-, Migrations-, Frontend-, Dokumentations-,
-Shell-, Compose- und Docker-Prüfungen sind bestanden.
+**Status: umgesetzt und technisch freigegeben am 1. August 2026.**
+
+Die vollständige Hostvalidierung endete mit
+`SPRINT_3A_HOST_VALIDATION_OK`. Sämtliche Backend-, Frontend-, SQLite-,
+PostgreSQL-, Compose-, Docker-, Shell-, Markdown- und Smoke-Prüfungen waren
+erfolgreich. Damit ist die Definition of Done erfüllt. Der getrennte
+npm-Audit-Folgepunkt ist ein Wartungsthema und blockiert den fachlichen und
+technischen Abschluss von Sprint 3A nicht.

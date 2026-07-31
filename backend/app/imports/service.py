@@ -51,6 +51,7 @@ class ImportResult:
     session_id: UUID
     content_hash: str | None
     skipped: bool
+    duplicate_of_session_id: UUID | None = None
     outcome: ImportOutcome = ImportOutcome.SUCCESS
     accepted_count: int = 0
     rejected_count: int = 0
@@ -166,6 +167,7 @@ class ImportService:
                     session_id=session.id,
                     content_hash=import_hash,
                     skipped=True,
+                    duplicate_of_session_id=previous.id,
                     outcome=ImportOutcome.DUPLICATE,
                     accepted_count=0,
                     rejected_count=0,

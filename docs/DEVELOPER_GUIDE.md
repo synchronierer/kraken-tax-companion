@@ -54,6 +54,22 @@ alembic revision --autogenerate -m "describe change"
 Autogenerierte Migrationen müssen geprüft werden. SQLite ist die anfängliche
 Datenbank; portable Typen und Grenzen halten den Weg zu PostgreSQL offen.
 
+`UtcDateTime` verwendet auf PostgreSQL `TIMESTAMP WITH TIME ZONE` und auf
+SQLite den kompatiblen zeitzonenlosen Speichertyp; die Python-Grenze akzeptiert
+weiterhin ausschließlich aware Werte und normalisiert sie auf UTC. Strukturierte
+Nachweise verwenden zentral `STRUCTURED_JSON`: PostgreSQL kompiliert ihn als
+`JSONB`, SQLite als `JSON`. Der Alembic-Typvergleich behandelt nur
+`UtcDateTime` und einen tatsächlich zeitzonenfähigen PostgreSQL-Zeitstempel als
+gleichwertig. Ein `timezone=False`-Mismatch sowie alle anderen Typänderungen
+bleiben sichtbar.
+
+Der Sprint-3A-Abschluss hat Upgrade, `alembic check`, Downgrade von 0005 auf
+0004, erneutes Upgrade und einen zweiten Check mit PostgreSQL 16 und SQLite
+driftfrei bestätigt. Künftige Schemaänderungen müssen denselben Zyklus in einer
+isolierten Testdatenbank wiederholen. Dafür gelten die Projektabhängigkeiten
+aus `backend/pyproject.toml`, insbesondere `psycopg[binary]`; Anwendung und
+Migrationen müssen aus dem zu prüfenden Quellbaum geladen werden.
+
 ## Decimal- und UTC-Strategie
 
 Geld, Kurse und Mengen werden durchgehend als `Decimal` verarbeitet. Binäre
@@ -112,13 +128,22 @@ SQLAlchemy-Sessions. Die konkrete Unit of Work bündelt zusammengehörige
 Änderungen in einer Transaktion und entscheidet explizit über Commit oder
 Rollback.
 
+## EUR-Bewertung und UI
+
+`app/core/valuation.py` enthält Methoden und Rechenregeln,
+`app/infrastructure/coingecko.py` den ersten HTTP-Adapter. Migration 0005
+persistiert Runs, Tagespreise und Entscheidungen. Die API unter `/api` wird von
+der React-Oberfläche für Übersicht, Importe, Vorgänge, Bewertungen, Prüffälle
+und Systemstatus verwendet. Details stehen in [valuation.md](valuation.md) und
+[ui.md](ui.md).
+
 ## Teststrategie
 
 Backend-Tests decken Domain-Invarianten, Architekturgrenzen, Importverhalten,
 Persistenz und Migrationen ab. Pytest läuft mit strikter Konfiguration und
-erzwingt 100 Prozent Coverage. Das Frontend besitzt Lint, Typecheck und Build,
-aber derzeit kein Testskript. Tests verwenden ausschließlich synthetische
-Daten, niemals echte Nutzer- oder Steuerdaten.
+erzwingt 100 Prozent Coverage. Das Frontend besitzt reproduzierbare
+Verhaltenstests sowie Lint, Typecheck und Produktionsbuild. Tests verwenden
+ausschließlich synthetische Daten, niemals echte Nutzer- oder Steuerdaten.
 
 ## Lokaler Entwicklungsworkflow
 
@@ -135,6 +160,45 @@ Der Docker-Stack startet mit:
 cp .env.example .env
 docker compose up --build
 ```
+
+Das Produktionsfrontend verwendet standardmäßig keine absolute API-Adresse.
+Der Browser ruft `/api/...` über denselben Host und Port 5173 auf; Nginx
+proxyt intern zu `backend:8000`. `VITE_API_BASE_URL` bleibt leer und ist nur
+eine bewusst gesetzte Entwicklungsoption. Damit funktionieren entfernte
+Browser und wechselnde Server-IP-Adressen ohne Frontend-Neubau.
+
+Die dauerhaft unterstützten statischen, Backend-, Frontend- und
+Dokumentationsprüfungen werden mit `make check` ausgeführt. Vor einer Freigabe
+sind zusätzlich `docker compose config -q`, ein isolierter Compose-Smoke-Test
+und die vollständigen SQLite-/PostgreSQL-Migrationszyklen auszuführen. Der
+Sprint-3A-Abschluss hat diesen Vertrag vollständig erfüllt. Temporäre
+Validierungs- und Diagnoseartefakte gehören nicht zum dauerhaften
+Repositoryvertrag.
+
+Die Sprint-3A-API umfasst Dashboard, Kraken-Upload, Transformationen,
+Ereignisse, Requirements, Bewertungsruns, Entscheidungen, manuelle
+Einzel-/CSV-Kurse, Preisnachweise, Prüffälle und Systemstatus:
+
+```text
+GET  /api/dashboard
+POST /api/imports/kraken
+GET  /api/imports[/{id}]
+POST /api/transformations
+GET  /api/transformations[/{id}]
+GET  /api/events[/{type}/{id}]
+GET  /api/valuation-requirements
+POST /api/valuations
+GET  /api/valuations[/{id}]
+POST /api/prices/manual
+POST /api/prices/manual/csv
+GET  /api/prices[/{id}]
+GET  /api/reviews[/{id}]
+GET  /api/system/status
+```
+
+Listen validieren Offset und Limit; Bewertungslisten zusätzlich Asset,
+Status, Methode und Datumsbereich. Detailantworten enthalten keine
+SQLAlchemy-Objekte, sondern Pydantic-validierte Transportdaten.
 
 ## Codex-Workflow
 

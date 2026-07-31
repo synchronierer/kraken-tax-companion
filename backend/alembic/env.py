@@ -6,6 +6,7 @@ from alembic import context
 from app import models
 from app.config.settings import get_settings
 from app.database.base import Base
+from app.database.types import compare_database_type
 
 models.configure_mappings()
 
@@ -24,7 +25,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        compare_type=True,
+        compare_type=compare_database_type,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -40,7 +41,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            compare_type=True,
+            compare_type=compare_database_type,
         )
         with context.begin_transaction():
             context.run_migrations()

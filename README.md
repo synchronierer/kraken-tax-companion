@@ -41,6 +41,11 @@ Open the frontend at <http://localhost:5173>. The API is available at
 <http://localhost:8000/docs>, and the health check at
 <http://localhost:8000/health>.
 
+Die Weboberfläche bietet jetzt den durchgängigen Ablauf von Kraken-CSV über
+Transformation und EUR-Bewertung bis zu Prüffällen und Provenienz. CoinGecko
+ist standardmäßig deaktiviert; Modus und optionaler Schlüssel werden nur über
+die in `.env.example` dokumentierten Backend-Variablen konfiguriert.
+
 Expected health response:
 
 ```json
@@ -49,6 +54,21 @@ Expected health response:
   "version": "0.1.0"
 }
 ```
+
+Für Browser auf einem anderen Rechner wird die IP des Docker-Servers mit Port
+5173 verwendet, beispielsweise `http://192.168.1.20:5173`. API-Aufrufe laufen
+unter demselben Origin über `/api`; Frontend-Nginx leitet sie intern an das
+Backend weiter. Eine geänderte Server-IP erfordert keinen Neubau. Port 8000 ist
+nur für Entwicklung, OpenAPI-Dokumentation und direkte Diagnose nötig.
+`VITE_API_BASE_URL` bleibt dafür leer. Die Compose-Hostports können bei
+isolierten Prüfungen über `FRONTEND_PORT` und `BACKEND_PORT` geändert werden;
+ohne Konfiguration bleiben 5173 und 8000 aktiv.
+
+Sprint 3A ist technisch freigegeben. Der Abschlusslauf bestätigte Backend- und
+Frontendprüfungen, beide Datenbankdialekte sowie den isolierten
+Docker-Compose-Smoke-Test. Die dauerhaft unterstützten Projektprüfungen werden
+mit `make check` ausgeführt; temporäre Validierungsskripte sind kein Bestandteil
+des Repositoryvertrags.
 
 Stop the stack with `docker compose down`. Named volumes retain database,
 logs, and export data.
@@ -84,6 +104,12 @@ Development progresses from repository foundations through import, the tax
 journal, FIFO calculation, recommendations, sales review, Home Assistant
 integration, and the 1.0 release. Details are in
 [docs/roadmap.md](docs/roadmap.md).
+
+`POST /api/imports/kraken?transform=true` führt den weiterhin getrennt
+auditierbaren Transformationslauf unmittelbar nach dem Import aus und liefert
+seine typisierte Zusammenfassung mit. Ohne den Parameter bleibt der Endpunkt
+ein reiner Import. Wiederholte identische Aufrufe referenzieren eine bereits
+erfolgreiche Transformation, statt Domainobjekte doppelt anzulegen.
 
 ## License
 

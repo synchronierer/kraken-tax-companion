@@ -249,6 +249,7 @@ def test_generic_batch_import_and_duplicate_result() -> None:
     assert first.import_hash == first.content_hash
     assert duplicate.outcome is ImportOutcome.DUPLICATE
     assert duplicate.skipped is True
+    assert duplicate.duplicate_of_session_id == first.session_id
     with factory() as database:
         stored = tuple(database.scalars(select(RawImportRecord)))
         assert [item.sequence_number for item in stored] == [0, 1]

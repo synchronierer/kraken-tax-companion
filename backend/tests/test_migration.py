@@ -74,6 +74,10 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "fee_events",
         "domain_provenance",
         "valuation_requirements",
+        "valuation_runs",
+        "daily_prices",
+        "valuation_decisions",
+        "provider_evidence",
     }
     assert {"import_hash", "error_summary"}.issubset(
         {column["name"] for column in inspector.get_columns("import_sessions")}
@@ -89,6 +93,18 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         constraint["column_names"] == ["stable_key"]
         for constraint in inspector.get_unique_constraints("trade_executions")
     )
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("daily_prices")
+    } == {"uq_daily_price_evidence", "uq_daily_price_version"}
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("provider_evidence")
+    } == {"uq_provider_evidence_identity"}
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("valuation_decisions")
+    } == {"uq_valuation_decision_version"}
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM raw_import_records")) == 1
 

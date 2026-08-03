@@ -11,6 +11,12 @@ decisions require reproducible calculations and a clear provenance trail. The
 project prioritizes immutable source data, explicit transformations, and
 human-reviewable recommendations.
 
+Die optionale, nur lesende Kraken-Ledger-Vorschau ist unter
+`/api/kraken/connection` und `/api/kraken/ledger-preview` verfügbar. Sie
+persistiert keine Daten und wird vor einem späteren Live-Import mit einem
+CSV-Export desselben Zeitraums verglichen. Konfiguration und sicherer Aufruf
+stehen in [docs/kraken-live-api.md](docs/kraken-live-api.md).
+
 ## Architecture
 
 The repository is a monorepo with a FastAPI backend and a React single-page
@@ -111,6 +117,38 @@ seine typisierte Zusammenfassung mit. Ohne den Parameter bleibt der Endpunkt
 ein reiner Import. Wiederholte identische Aufrufe referenzieren eine bereits
 erfolgreiche Transformation, statt Domainobjekte doppelt anzulegen.
 
+Sprint 3B ist in Umsetzung. Auf bewerteten Ereignissen baut eine versionierte
+FIFO-Engine mit Beständen, Loszuordnungen, Steuerjournal, Jahresübersicht sowie
+CSV- und PDF-Arbeitsdokumenten auf. Die UI ergänzt Steuerübersicht,
+FIFO-Zuordnungen, Bestände, Steuerjournal und Exporte. Die Anwendung bleibt
+eine Arbeitsdokumentation und keine individuelle Steuerberatung.
+
+Die neuen API-Verträge umfassen `/api/tax-calculations`,
+`/api/inventory-lots`, `/api/lot-allocations`, `/api/tax-journal`,
+`/api/tax-summary` und `/api/exports`. Exportdateien liegen ausschließlich im
+über `APP_EXPORT_DIRECTORY` konfigurierten Verzeichnis. Dauerhafte Prüfungen:
+
+```bash
+scripts/preflight.sh
+scripts/postgres-schema-check.sh
+scripts/validate-sprint-3b.sh
+```
+
 ## License
 
 Kraken Tax Companion is licensed under the [MIT License](LICENSE).
+
+## Kraken-Live-Ledger
+
+Unter „Kraken API“ kann ein nur lesender Live-Ledger-Abruf mit einer Kraken-CSV
+desselben halboffenen UTC-Zeitraums verglichen werden. Erst ein identischer
+Ledger-ID-Digest und eine ausdrückliche Bestätigung erlauben den atomaren
+Import. API-Schlüssel bleiben ausschließlich serverseitig; Handels-, Ein- und
+Auszahlungsfunktionen existieren nicht. Siehe
+[Kraken Live API](docs/kraken-live-api.md).
+
+Staking-Rewards werden mit dem aktiven Vertrag `eur-valuation-v2` in
+Bruttoertrag, einbehaltenen Gebührenkandidaten und Netto-Anschaffungswert
+aufgeteilt. Der Bestand verwendet nur die Nettomenge. Die Anwendung klassifiziert
+die Plattformgebühr nicht automatisch als steuerlich abzugsfähig und erzeugt
+dafür weder ein künstliches FeeEvent noch eine fiktive Veräußerung.

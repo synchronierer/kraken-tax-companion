@@ -17,6 +17,17 @@ economic facts. Future layers may consume those facts but never mutate sources.
 Sprint 2D adds the provider-neutral Domain Layer while keeping valuation and
 the Tax Layer separate.
 
+## Nur lesender Kraken-Live-Zugriff
+
+Der private Kraken-REST-Adapter liegt ausschließlich in Infrastructure. Die
+API orchestriert Connection- und Ledger-Diagnose; die Vorschau und der
+CSV/API-Abgleich öffnen keine Unit of Work. Der Adapter signiert
+form-urlencoded POST-Anfragen, erzeugt prozessweit monoton steigende Nonces und
+liefert ein vom Kraken-Rohformat getrenntes Diagnosemodell. Erst der durch
+Digest und ausdrückliche Bestätigung gesicherte Import übergibt kanonische
+Datensätze atomar an die vorhandene Importengine. Seine Idempotenz beruht auf
+der unveränderten Ledger-ID.
+
 ## Import Pipeline
 
 ```text
@@ -160,6 +171,10 @@ single JSON column introduced by revision 0003 with the PostgreSQL `JSONB`
 contract. Alembic uses a narrow custom comparison only for the physical
 representation of `UtcDateTime`: PostgreSQL `timezone=True` is equivalent,
 whereas `timezone=False` and unrelated type changes continue to produce drift.
+Revision `0006_fifo_tax_journal_exports` ergänzt unveränderliche
+FIFO-Detailnachweise, Steuerjournal und sichere Exportartefakte. Rechen- und
+Exportläufe sind kontrollierte Statushüllen; ihre Detailnachweise bleiben
+append-only.
 
 ## Frontend
 
@@ -185,6 +200,18 @@ erzeugen Nachfolger mit `supersedes_id`. API-Details bilden die Kette von
 ImportSession über Rohdatensatz, Transformation und Domainobjekt bis zu
 Requirement, Evidenz, Tagespreis, Entscheidung und Audit ab. Fehlende
 optionale Glieder bleiben ausdrücklich `null` oder leer.
+
+## FIFO- und Steuerpipeline
+
+Die providerneutrale Core-Funktion konsumiert nur aufgelöste
+Bewertungsentscheidungen. Sie sortiert Erwerbe stabil nach UTC-Zeitpunkt und
+UUID, erzeugt Bestandslose und verteilt Veräußerungen deterministisch. API und
+Persistence orchestrieren; SQLAlchemy und FastAPI bleiben außerhalb des Core.
+
+Regelversionen und ein kanonischer Snapshot bilden mit dem Zeitraum den
+Idempotenzvertrag. Abweichende Daten oder Regeln erzeugen einen neuen Lauf mit
+Vorgängerreferenz. Exporte verwenden registrierte Artefakte, sichere
+Basisnamen und ein konfiguriertes Wurzelverzeichnis.
 
 ## Cross-Cutting Concerns
 
@@ -223,3 +250,50 @@ Asset-Mappingversion Eigentum des konkreten Infrastructure-Adapters sind.
 Import und optionale Direkttransformation verwenden dieselbe requestgebundene
 Unit-of-Work-Factory, sodass API-Dependency-Overrides und Produktionszugriffe
 garantiert denselben Datenbankkontext sehen.
+
+## Kanonischer Kraken-Ledgervertrag
+
+CSV- und Private-REST-Adapter erzeugen denselben providerinternen
+`CanonicalKrakenLedgerRecord`. Die Infrastructure verantwortet Signatur,
+Pagination und technische Fehler; der Adapter verantwortet Quellen- und
+Assetnormalisierung. Die generische Importengine kennt Kraken nicht und nutzt
+nur den kanonischen externen Schlüssel. Migration 0007 ergänzt dessen
+quellenübergreifend eindeutige Persistenz. Vergleich und Vorschau sind
+read-only; nur der bestätigte Digest-Import öffnet eine atomare Unit of Work.
+
+Der versionierte Ledger-Normalisierer trennt Rohcode, Basisasset,
+Produktmarker und Produktsuffix. Aliasnormalisierung ist explizit;
+syntaktisch gültige unbekannte Basisassets werden ohne Bedeutungsannahme per
+Identität normalisiert. Dadurch bleibt die Integration vorwärtskompatibel,
+ohne `.S`, `.B`, `.F` oder `.M` als Wallet zu interpretieren. Nur leere,
+ungültige oder nicht eindeutig zerlegbare Codes sind blockierende Unknowns.
+
+Diese Normalisierung ist zugleich die einzige Kraken-Assetgrenze für CSV,
+Private REST, Rohdatensatz und Domaintransformation. Der Adapter persistiert
+die kanonische Identität in den technischen Metadaten; die Transformation
+verwendet sie bevorzugt und fällt bei älteren Rohdatensätzen auf dieselbe
+Funktion zurück. Eine zweite, kleinere Aliasliste im fachlichen Lauf gibt es
+nicht. Produktvarianten bleiben technische Quellenmerkmale und werden nicht
+als Walletsemantik interpretiert.
+
+`kraken-domain-v1` bleibt als historischer Transformationsvertrag lesbar und
+reproduzierbar. Der aktive Vertrag `kraken-domain-v2` verwendet die generische
+Identitätsnormalisierung. Fachliche Stable Keys bleiben dabei gegenüber v1
+stabil: eine identische v1-Projektion wird im v2-Lauf referenziert und als
+`DOMAIN_EVENT_REUSED` entschieden, nicht erneut erzeugt. Nur bisher wegen der
+alten Aliasgrenze fehlende Projektionen werden angelegt; frühere Decisions und
+Reviews bleiben unverändert.
+
+## Rewardbewertung und Steuergrenze
+
+Migration 0008 erweitert die unveränderliche `ValuationDecision` additiv um
+Brutto-, Gebühren- und Nettokomponenten. `eur-valuation-v1` bleibt als
+Nettovertrag reproduzierbar; `eur-valuation-v2` ist der aktive Vertrag. Alle
+drei Komponenten referenzieren denselben DailyPrice und dieselbe
+ProviderEvidence. Historische Zeilen bleiben nullable und werden nicht durch
+erfundene Werte aufgefüllt.
+
+FIFO erhält ausschließlich Nettomenge und Netto-Anschaffungswert. Das
+Steuerjournal liest den Bruttoertrag aus dem expliziten Feld und behandelt die
+Plattformgebühr als überprüfbaren Kandidaten. Damit kann keine generische
+`eur_value`-Spalte versehentlich zugleich Ertrag und Bestandswert bedeuten.

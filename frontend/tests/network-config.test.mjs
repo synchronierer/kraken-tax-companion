@@ -62,3 +62,44 @@ test("production UI has no mock data, injected HTML or valuation formula", () =>
   assert.match(uiModels, /validateManualPrice/);
   assert.match(uiModels, /safeSystemEntries/);
 });
+
+test("Sprint 3B navigation uses backend tax and export contracts", () => {
+  for (const label of [
+    "Steuerübersicht",
+    "FIFO-Zuordnungen",
+    "Bestände",
+    "Steuerjournal",
+    "Exporte",
+  ]) {
+    assert.match(app, new RegExp(label));
+  }
+  for (const endpoint of [
+    "/api/tax-summary",
+    "/api/tax-calculations",
+    "/api/inventory-lots",
+    "/api/lot-allocations",
+    "/api/tax-journal",
+    "/api/exports",
+  ]) {
+    assert.match(app, new RegExp(endpoint));
+  }
+  assert.doesNotMatch(app, /gain_loss_eur\s*=|proceeds_eur\s*-/);
+  assert.doesNotMatch(app, /http:\/\/localhost|http:\/\/backend/);
+});
+
+test("Kraken API comparison gates the confirmed read-only import", () => {
+  for (const contract of [
+    "Kraken API",
+    "/api/kraken/connection",
+    "/api/kraken/ledger-compare",
+    "/api/kraken/ledger-import",
+    "ready_for_import",
+    "explicit_confirmation:true",
+    "expected_ledger_id_digest",
+    "transform:false",
+  ]) {
+    assert.match(app, new RegExp(contract));
+  }
+  assert.match(app, /disabled=\{busy\|\|comparison\.ready_for_import!==true\|\|!confirmed\}/);
+  assert.doesNotMatch(app, /KRAKEN_API_(?:KEY|SECRET)|withdraw|deposit|trade-order/i);
+});

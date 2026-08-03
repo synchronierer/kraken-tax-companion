@@ -19,7 +19,13 @@ class Settings(BaseSettings):
     coingecko_api_key: str | None = None
     coingecko_api_mode: str = "disabled"
     coingecko_timeout_seconds: int = 15
+    kraken_api_key: str | None = None
+    kraken_api_secret: str | None = None
+    kraken_api_base_url: str = "https://api.kraken.com"
+    kraken_api_timeout: int = 15
+    kraken_api_max_retries: int = 2
     max_upload_bytes: int = 5_000_000
+    export_directory: str = "/exports"
 
 
 @lru_cache

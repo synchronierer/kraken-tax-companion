@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Table,
@@ -28,6 +29,21 @@ from app.core.entities import (
     PriceSnapshot,
     RawImportRecord,
     Sale,
+)
+from app.core.tax import (
+    DisposalCalculation,
+    ExportArtifact,
+    ExportKind,
+    ExportRun,
+    ExportStatus,
+    InventoryLot,
+    JournalEntryType,
+    LotAllocation,
+    TaxCalculationRun,
+    TaxJournalEntry,
+    TaxRecordStatus,
+    TaxReviewCase,
+    TaxRunStatus,
 )
 from app.core.transformation import (
     AcquisitionLot,
@@ -51,6 +67,8 @@ from app.core.transformation import (
 )
 from app.core.valuation import (
     DailyPrice,
+    FeeTaxClassification,
+    FeeTaxReviewStatus,
     PriceMethod,
     ProviderEvidence,
     ValuationDecision,
@@ -172,7 +190,9 @@ raw_import_records = Table(
     Column("created_at", UtcDateTime(), nullable=False),
     Column("sequence_number", Integer, nullable=False),
     Column("external_id", String(255), nullable=True),
+    Column("canonical_key", String(512), nullable=True),
     Column("technical_metadata", STRUCTURED_JSON, nullable=False),
+    UniqueConstraint("canonical_key", name="uq_raw_import_canonical_key"),
     UniqueConstraint(
         "import_session_id",
         "sequence_number",
@@ -576,6 +596,23 @@ valuation_decisions = Table(
     Column("reason_code", String(128), nullable=False),
     Column("version", Integer, nullable=False),
     Column("rounding_rule", String(64), nullable=False),
+    Column("gross_quantity", AMOUNT, nullable=True),
+    Column("fee_quantity", AMOUNT, nullable=True),
+    Column("net_quantity", AMOUNT, nullable=True),
+    Column("gross_income_eur", AMOUNT, nullable=True),
+    Column("fee_value_eur", AMOUNT, nullable=True),
+    Column("net_acquisition_value_eur", AMOUNT, nullable=True),
+    Column("valuation_basis", String(128), nullable=True),
+    Column(
+        "fee_tax_classification",
+        Enum(FeeTaxClassification, native_enum=False),
+        nullable=True,
+    ),
+    Column(
+        "fee_tax_review_status",
+        Enum(FeeTaxReviewStatus, native_enum=False),
+        nullable=True,
+    ),
     Column("supersedes_id", UUID, ForeignKey("valuation_decisions.id"), nullable=True),
     Column(
         "provider_evidence_id",
@@ -628,6 +665,251 @@ provider_evidence = Table(
     ),
 )
 
+tax_calculation_runs = Table(
+    "tax_calculation_runs",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column("period_start", Date, nullable=False),
+    Column("period_end", Date, nullable=False),
+    Column("snapshot_hash", String(64), nullable=False),
+    Column("rules_fingerprint", String(64), nullable=False),
+    Column("status", Enum(TaxRunStatus, native_enum=False), nullable=False),
+    Column("started_at", UtcDateTime(), nullable=False),
+    Column("fifo_rule_version", String(64), nullable=False),
+    Column("fee_rule_version", String(64), nullable=False),
+    Column("classification_rule_version", String(64), nullable=False),
+    Column("journal_rule_version", String(64), nullable=False),
+    Column("export_format_version", String(64), nullable=False),
+    Column("ended_at", UtcDateTime(), nullable=True),
+    Column("checked_events", Integer, nullable=False),
+    Column("created_allocations", Integer, nullable=False),
+    Column("created_journal_entries", Integer, nullable=False),
+    Column("review_count", Integer, nullable=False),
+    Column("error_count", Integer, nullable=False),
+    Column("error_summary", String(1024), nullable=True),
+    Column("supersedes_id", UUID, ForeignKey("tax_calculation_runs.id")),
+    UniqueConstraint(
+        "period_start",
+        "period_end",
+        "snapshot_hash",
+        "rules_fingerprint",
+        name="uq_tax_run_identity",
+    ),
+    CheckConstraint(
+        "period_end >= period_start AND checked_events >= 0 "
+        "AND created_allocations >= 0 AND created_journal_entries >= 0 "
+        "AND review_count >= 0 AND error_count >= 0",
+        name="ck_tax_run_values",
+    ),
+)
+
+inventory_lots = Table(
+    "inventory_lots",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "tax_calculation_run_id",
+        UUID,
+        ForeignKey("tax_calculation_runs.id"),
+        nullable=False,
+    ),
+    Column(
+        "acquisition_lot_id", UUID, ForeignKey("acquisition_lots.id"), nullable=False
+    ),
+    Column("asset_code", COIN, nullable=False),
+    Column("original_quantity", AMOUNT, nullable=False),
+    Column("remaining_quantity", AMOUNT, nullable=False),
+    Column("acquired_at", UtcDateTime(), nullable=False),
+    Column("acquisition_value_eur", AMOUNT, nullable=False),
+    Column("acquisition_fee_eur", AMOUNT, nullable=False),
+    Column("remaining_cost_eur", AMOUNT, nullable=False),
+    Column(
+        "valuation_decision_id",
+        UUID,
+        ForeignKey("valuation_decisions.id"),
+        nullable=False,
+    ),
+    Column("rule_version", String(64), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    UniqueConstraint(
+        "tax_calculation_run_id",
+        "acquisition_lot_id",
+        name="uq_inventory_run_acquisition",
+    ),
+    Index("ix_inventory_asset_remaining", "asset_code", "remaining_quantity"),
+    CheckConstraint(
+        "original_quantity > 0 AND remaining_quantity >= 0 "
+        "AND remaining_quantity <= original_quantity AND acquisition_value_eur > 0 "
+        "AND acquisition_fee_eur >= 0 AND remaining_cost_eur >= 0 AND sequence >= 0",
+        name="ck_inventory_lot_values",
+    ),
+)
+
+lot_allocations = Table(
+    "lot_allocations",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "tax_calculation_run_id",
+        UUID,
+        ForeignKey("tax_calculation_runs.id"),
+        nullable=False,
+    ),
+    Column("disposal_event_id", UUID, ForeignKey("disposal_events.id"), nullable=False),
+    Column("inventory_lot_id", UUID, ForeignKey("inventory_lots.id"), nullable=False),
+    Column("allocated_quantity", AMOUNT, nullable=False),
+    Column("allocation_order", Integer, nullable=False),
+    Column("acquisition_cost_eur", AMOUNT, nullable=False),
+    Column("disposal_proceeds_eur", AMOUNT, nullable=False),
+    Column("disposal_fee_eur", AMOUNT, nullable=False),
+    Column("gain_loss_eur", AMOUNT, nullable=False),
+    Column("acquired_at", UtcDateTime(), nullable=False),
+    Column("disposed_at", UtcDateTime(), nullable=False),
+    Column("holding_seconds", Integer, nullable=False),
+    Column("fifo_rule_version", String(64), nullable=False),
+    Column("fee_rule_version", String(64), nullable=False),
+    Column("created_at", UtcDateTime(), nullable=False),
+    UniqueConstraint(
+        "tax_calculation_run_id",
+        "disposal_event_id",
+        "allocation_order",
+        name="uq_allocation_order",
+    ),
+    Index("ix_allocations_disposal", "disposal_event_id", "allocation_order"),
+    CheckConstraint(
+        "allocated_quantity > 0 AND allocation_order > 0 "
+        "AND acquisition_cost_eur >= 0 AND disposal_proceeds_eur >= 0 "
+        "AND disposal_fee_eur >= 0 AND holding_seconds >= 0",
+        name="ck_lot_allocation_values",
+    ),
+)
+
+disposal_calculations = Table(
+    "disposal_calculations",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "tax_calculation_run_id",
+        UUID,
+        ForeignKey("tax_calculation_runs.id"),
+        nullable=False,
+    ),
+    Column("disposal_event_id", UUID, ForeignKey("disposal_events.id"), nullable=False),
+    Column("quantity", AMOUNT, nullable=False),
+    Column("allocated_quantity", AMOUNT, nullable=False),
+    Column("proceeds_eur", AMOUNT, nullable=False),
+    Column("acquisition_cost_eur", AMOUNT, nullable=False),
+    Column("fees_eur", AMOUNT, nullable=False),
+    Column("gain_loss_eur", AMOUNT, nullable=False),
+    Column("status", Enum(TaxRecordStatus, native_enum=False), nullable=False),
+    Column("rule_version", String(64), nullable=False),
+    UniqueConstraint(
+        "tax_calculation_run_id",
+        "disposal_event_id",
+        name="uq_disposal_calculation_run",
+    ),
+)
+
+tax_journal_entries = Table(
+    "tax_journal_entries",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "tax_calculation_run_id",
+        UUID,
+        ForeignKey("tax_calculation_runs.id"),
+        nullable=False,
+    ),
+    Column("occurred_at", UtcDateTime(), nullable=False),
+    Column("tax_year", Integer, nullable=False),
+    Column("entry_type", Enum(JournalEntryType, native_enum=False), nullable=False),
+    Column("asset_code", COIN, nullable=False),
+    Column("quantity", AMOUNT, nullable=False),
+    Column("eur_value", AMOUNT, nullable=False),
+    Column("proceeds_eur", AMOUNT),
+    Column("acquisition_cost_eur", AMOUNT),
+    Column("gain_loss_eur", AMOUNT),
+    Column("holding_seconds", Integer),
+    Column("classification", String(255), nullable=False),
+    Column("rule_version", String(64), nullable=False),
+    Column("status", Enum(TaxRecordStatus, native_enum=False), nullable=False),
+    Column("source_object_type", String(64), nullable=False),
+    Column("source_object_id", UUID, nullable=False),
+    Column("valuation_decision_id", UUID, ForeignKey("valuation_decisions.id")),
+    Column("lot_allocation_id", UUID, ForeignKey("lot_allocations.id")),
+    Column("supersedes_id", UUID, ForeignKey("tax_journal_entries.id")),
+    UniqueConstraint(
+        "tax_calculation_run_id",
+        "entry_type",
+        "source_object_id",
+        "lot_allocation_id",
+        name="uq_tax_journal_source",
+    ),
+    Index("ix_tax_journal_year_type", "tax_year", "entry_type"),
+)
+
+tax_review_cases = Table(
+    "tax_review_cases",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "tax_calculation_run_id",
+        UUID,
+        ForeignKey("tax_calculation_runs.id"),
+        nullable=False,
+    ),
+    Column("code", String(128), nullable=False),
+    Column("message", String(1024), nullable=False),
+    Column("source_object_type", String(64), nullable=False),
+    Column("source_object_id", UUID, nullable=False),
+    Column("occurred_at", UtcDateTime(), nullable=False),
+    UniqueConstraint(
+        "tax_calculation_run_id",
+        "code",
+        "source_object_id",
+        name="uq_tax_review_source",
+    ),
+)
+
+export_runs = Table(
+    "export_runs",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "tax_calculation_run_id",
+        UUID,
+        ForeignKey("tax_calculation_runs.id"),
+        nullable=False,
+    ),
+    Column("kind", Enum(ExportKind, native_enum=False), nullable=False),
+    Column("status", Enum(ExportStatus, native_enum=False), nullable=False),
+    Column("period_start", Date, nullable=False),
+    Column("period_end", Date, nullable=False),
+    Column("rules_fingerprint", String(64), nullable=False),
+    Column("started_at", UtcDateTime(), nullable=False),
+    Column("completed_at", UtcDateTime()),
+    Column("error_summary", String(1024)),
+    UniqueConstraint("tax_calculation_run_id", "kind", name="uq_export_run_kind"),
+)
+
+export_artifacts = Table(
+    "export_artifacts",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "export_run_id", UUID, ForeignKey("export_runs.id"), nullable=False, unique=True
+    ),
+    Column("kind", Enum(ExportKind, native_enum=False), nullable=False),
+    Column("file_name", String(255), nullable=False, unique=True),
+    Column("media_type", String(128), nullable=False),
+    Column("size_bytes", Integer, nullable=False),
+    Column("sha256_hash", String(64), nullable=False),
+    Column("created_at", UtcDateTime(), nullable=False),
+    CheckConstraint(
+        "size_bytes >= 0 AND length(sha256_hash) = 64", name="ck_export_artifact_values"
+    ),
+)
+
 
 def reject_update(_: Mapper[Any], connection: Any, target: object) -> None:
     del connection, target
@@ -660,10 +942,18 @@ def configure_mappings() -> None:
         mapper_registry.map_imperatively(DailyPrice, daily_prices),
         mapper_registry.map_imperatively(ValuationDecision, valuation_decisions),
         mapper_registry.map_imperatively(ProviderEvidence, provider_evidence),
+        mapper_registry.map_imperatively(InventoryLot, inventory_lots),
+        mapper_registry.map_imperatively(LotAllocation, lot_allocations),
+        mapper_registry.map_imperatively(DisposalCalculation, disposal_calculations),
+        mapper_registry.map_imperatively(TaxJournalEntry, tax_journal_entries),
+        mapper_registry.map_imperatively(TaxReviewCase, tax_review_cases),
+        mapper_registry.map_imperatively(ExportArtifact, export_artifacts),
     ]
     mapper_registry.map_imperatively(ImportSession, import_sessions)
     mapper_registry.map_imperatively(TransformationRun, transformation_runs)
     mapper_registry.map_imperatively(ValuationRun, valuation_runs)
+    mapper_registry.map_imperatively(TaxCalculationRun, tax_calculation_runs)
+    mapper_registry.map_imperatively(ExportRun, export_runs)
     mapper_registry.map_imperatively(Sale, sales)
     mapper_registry.map_imperatively(Configuration, configurations)
     for mapper in immutable_mappers:

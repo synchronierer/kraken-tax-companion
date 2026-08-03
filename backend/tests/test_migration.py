@@ -40,8 +40,9 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
             text(
                 "INSERT INTO raw_import_records "
                 "(id, import_session_id, source, content_hash, payload, created_at, "
-                "sequence_number, technical_metadata) "
-                "VALUES (:id, :session, 'synthetic', :hash, '{}', :now, 0, '{}')"
+                "sequence_number, external_id, technical_metadata) "
+                "VALUES (:id, :session, 'kraken-ledgers', :hash, '{}', :now, 0, "
+                "'kraken:ledger:L-existing', '{}')"
             ),
             {
                 "id": record_id,
@@ -78,17 +79,30 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "daily_prices",
         "valuation_decisions",
         "provider_evidence",
+        "tax_calculation_runs",
+        "inventory_lots",
+        "lot_allocations",
+        "disposal_calculations",
+        "tax_journal_entries",
+        "tax_review_cases",
+        "export_runs",
+        "export_artifacts",
     }
     assert {"import_hash", "error_summary"}.issubset(
         {column["name"] for column in inspector.get_columns("import_sessions")}
     )
-    assert {"sequence_number", "external_id", "technical_metadata"}.issubset(
+    assert {
+        "sequence_number",
+        "external_id",
+        "technical_metadata",
+        "canonical_key",
+    }.issubset(
         {column["name"] for column in inspector.get_columns("raw_import_records")}
     )
     assert {
         constraint["name"]
         for constraint in inspector.get_unique_constraints("raw_import_records")
-    } == {"uq_raw_import_session_sequence"}
+    } == {"uq_raw_import_canonical_key", "uq_raw_import_session_sequence"}
     assert any(
         constraint["column_names"] == ["stable_key"]
         for constraint in inspector.get_unique_constraints("trade_executions")
@@ -105,8 +119,60 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         constraint["name"]
         for constraint in inspector.get_unique_constraints("valuation_decisions")
     } == {"uq_valuation_decision_version"}
+    assert {
+        "gross_quantity",
+        "fee_quantity",
+        "net_quantity",
+        "gross_income_eur",
+        "fee_value_eur",
+        "net_acquisition_value_eur",
+        "valuation_basis",
+        "fee_tax_classification",
+        "fee_tax_review_status",
+    }.issubset(
+        {column["name"] for column in inspector.get_columns("valuation_decisions")}
+    )
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("tax_calculation_runs")
+    } == {"uq_tax_run_identity"}
+    assert {
+        index["name"] for index in inspector.get_indexes("tax_journal_entries")
+    } == {"ix_tax_journal_year_type"}
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM raw_import_records")) == 1
+        assert (
+            connection.scalar(text("SELECT canonical_key FROM raw_import_records"))
+            == "kraken:spot_ledger:L-existing"
+        )
+
+    command.downgrade(config, "0007_kraken_ledger_identity")
+    assert "gross_income_eur" not in {
+        column["name"] for column in inspect(engine).get_columns("valuation_decisions")
+    }
+    command.upgrade(config, "head")
+    command.check(config)
+    assert "gross_income_eur" in {
+        column["name"] for column in inspect(engine).get_columns("valuation_decisions")
+    }
+
+    command.downgrade(config, "0006_fifo_tax_journal_exports")
+    assert "canonical_key" not in {
+        column["name"] for column in inspect(engine).get_columns("raw_import_records")
+    }
+    command.upgrade(config, "head")
+    command.check(config)
+    assert "canonical_key" in {
+        column["name"] for column in inspect(engine).get_columns("raw_import_records")
+    }
+
+    command.downgrade(config, "0005_eur_valuation")
+    downgraded_tables = set(inspect(create_engine(database_url)).get_table_names())
+    assert "tax_calculation_runs" not in downgraded_tables
+    assert "valuation_decisions" in downgraded_tables
+    command.upgrade(config, "head")
+    command.check(config)
+    assert "tax_calculation_runs" in inspect(engine).get_table_names()
 
     command.downgrade(config, "base")
     assert inspect(create_engine(database_url)).get_table_names() == ["alembic_version"]

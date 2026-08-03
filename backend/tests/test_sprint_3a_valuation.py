@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -26,17 +26,22 @@ from app.core.transformation import (
     ValuationStatus,
 )
 from app.core.valuation import (
+    LEGACY_METHOD_VERSION,
     METHOD_VERSION,
     DailyPrice,
+    FeeTaxClassification,
+    FeeTaxReviewStatus,
     PriceMethod,
     PriceObservation,
     PriceProviderError,
     ProviderEvidence,
+    RewardValuationError,
     ValuationDecision,
     ValuationDecisionStatus,
     ValuationRun,
     ValuationRunStatus,
     calculate_eur_value,
+    calculate_reward_valuation,
     daily_average,
     display_cents,
     evidence_hash,
@@ -91,6 +96,128 @@ def test_calculation_contract() -> None:
         calculate_eur_value(Decimal("0"), Decimal("1"))
     with pytest.raises((TypeError, ValueError)):
         PriceObservation(observed_at=NOW, price_eur=Decimal("-1"))
+
+
+@pytest.mark.parametrize(
+    ("gross", "fee", "net", "unit"),
+    [
+        ("1", "0.1", "0.9", "100"),
+        (
+            "0.000000000000000003",
+            "0.000000000000000001",
+            "0.000000000000000002",
+            "1.234567890123456789",
+        ),
+        ("2.34567891", "0", "2.34567891", "40000.123456789012345678"),
+    ],
+)
+def test_reward_valuation_v2_preserves_exact_components(
+    gross: str, fee: str, net: str, unit: str
+) -> None:
+    result = calculate_reward_valuation(
+        net_quantity=Decimal(net),
+        gross_quantity=Decimal(gross),
+        fee_quantity=Decimal(fee),
+        asset_code="ETH",
+        fee_asset="ETH" if Decimal(fee) else None,
+        unit_price_eur=Decimal(unit),
+        method_version=METHOD_VERSION,
+    )
+    assert result.gross_income_eur == Decimal(gross) * Decimal(unit)
+    assert result.fee_value_eur == Decimal(fee) * Decimal(unit)
+    assert result.net_acquisition_value_eur == Decimal(net) * Decimal(unit)
+    assert (
+        result.gross_income_eur
+        == result.net_acquisition_value_eur + result.fee_value_eur
+    )
+    assert result.fee_tax_review_status is (
+        FeeTaxReviewStatus.REVIEW_REQUIRED
+        if Decimal(fee)
+        else FeeTaxReviewStatus.NOT_REQUIRED
+    )
+    assert result.fee_tax_classification is (
+        FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+        if Decimal(fee)
+        else FeeTaxClassification.NOT_APPLICABLE
+    )
+
+
+def test_reward_valuation_versions_and_legacy_lot_fallback() -> None:
+    legacy = calculate_reward_valuation(
+        net_quantity=Decimal("0.9"),
+        gross_quantity=Decimal("99"),
+        fee_quantity=Decimal("98.1"),
+        asset_code="BTC",
+        fee_asset="OTHER",
+        unit_price_eur=Decimal("100"),
+        method_version=LEGACY_METHOD_VERSION,
+    )
+    assert legacy.gross_income_eur is legacy.fee_value_eur is None
+    assert legacy.net_acquisition_value_eur == Decimal("90")
+    assert legacy.valuation_basis == "staking_reward_net_quantity_legacy_v1"
+    fallback = calculate_reward_valuation(
+        net_quantity=Decimal("0.9"),
+        gross_quantity=None,
+        fee_quantity=None,
+        asset_code="BTC",
+        fee_asset=None,
+        unit_price_eur=Decimal("100"),
+        method_version=METHOD_VERSION,
+    )
+    assert fallback.gross_quantity == fallback.net_quantity == Decimal("0.9")
+    assert fallback.fee_quantity == fallback.fee_value_eur == Decimal("0")
+    assert fallback.valuation_basis == "staking_reward_legacy_lot_fallback_v2"
+
+
+@pytest.mark.parametrize(
+    ("gross", "fee", "net", "fee_asset", "code"),
+    [
+        ("1", "0.2", "0.9", "BTC", "valuation_reward_quantity_inconsistent"),
+        ("0", "0", "0.9", "BTC", "valuation_reward_quantity_inconsistent"),
+        ("1", "-0.1", "1.1", "BTC", "valuation_reward_quantity_inconsistent"),
+        ("1", "1.1", "0.1", "BTC", "valuation_reward_quantity_inconsistent"),
+        ("1", "0.1", "0.9", "ETH", "valuation_reward_fee_asset_mismatch"),
+    ],
+)
+def test_reward_valuation_v2_rejects_inconsistent_components(
+    gross: str, fee: str, net: str, fee_asset: str, code: str
+) -> None:
+    with pytest.raises(RewardValuationError) as raised:
+        calculate_reward_valuation(
+            net_quantity=Decimal(net),
+            gross_quantity=Decimal(gross),
+            fee_quantity=Decimal(fee),
+            asset_code="BTC",
+            fee_asset=fee_asset,
+            unit_price_eur=Decimal("100"),
+            method_version=METHOD_VERSION,
+        )
+    assert raised.value.code == code
+
+
+def test_reward_valuation_v2_requires_fee_when_gross_is_present() -> None:
+    with pytest.raises(RewardValuationError) as raised:
+        calculate_reward_valuation(
+            net_quantity=Decimal("1"),
+            gross_quantity=Decimal("1"),
+            fee_quantity=None,
+            asset_code="BTC",
+            fee_asset=None,
+            unit_price_eur=Decimal("100"),
+            method_version=METHOD_VERSION,
+        )
+    assert raised.value.code == "valuation_reward_quantity_inconsistent"
+    with pytest.raises(RewardValuationError) as fee_without_gross:
+        calculate_reward_valuation(
+            net_quantity=Decimal("0.9"),
+            gross_quantity=None,
+            fee_quantity=Decimal("0.1"),
+            asset_code="BTC",
+            fee_asset="BTC",
+            unit_price_eur=Decimal("100"),
+            method_version=METHOD_VERSION,
+        )
+    assert fee_without_gross.value.code == "valuation_reward_quantity_inconsistent"
 
 
 def test_evidence_and_daily_price_validation() -> None:
@@ -216,10 +343,35 @@ def test_decision_validates_financial_values_and_utc() -> None:
         decided_at=NOW,
         status=ValuationDecisionStatus.RESOLVED,
         reason_code="valuation_native_eur",
+        gross_quantity=Decimal("0.1"),
+        fee_quantity=Decimal("0"),
+        net_quantity=Decimal("0.1"),
+        gross_income_eur=Decimal("0.1"),
+        fee_value_eur=Decimal("0"),
+        net_acquisition_value_eur=Decimal("0.1"),
+        valuation_basis="synthetic_components",
+        fee_tax_classification=FeeTaxClassification.NOT_APPLICABLE,
+        fee_tax_review_status=FeeTaxReviewStatus.NOT_REQUIRED,
     )
     assert decision.eur_value == Decimal("0.1")
     with pytest.raises(ValueError):
         replace(decision, id=uuid4(), quantity=Decimal("0"))
+    invalid_changes = (
+        {"net_quantity": Decimal("0")},
+        {"net_quantity": Decimal("0.2")},
+        {"gross_quantity": Decimal("0")},
+        {"fee_quantity": Decimal("-0.1")},
+        {"gross_income_eur": Decimal("0")},
+        {"fee_value_eur": Decimal("-0.1")},
+        {"net_acquisition_value_eur": Decimal("0")},
+        {"net_acquisition_value_eur": Decimal("0.2")},
+        {"gross_quantity": Decimal("0.2")},
+        {"gross_income_eur": Decimal("0.2")},
+        {"fee_value_eur": None},
+    )
+    for changes in invalid_changes:
+        with pytest.raises(ValueError):
+            replace(decision, id=uuid4(), **changes)
 
 
 class Response:
@@ -685,6 +837,9 @@ def test_import_transform_manual_valuation_and_superseding(client: TestClient) -
     assert body["duplicate"] is False
     assert body["transformation"]["requirements"] == 1
     assert body["transformation"]["checked"] == 1
+    assert body["transformation"]["contract_version"] == "kraken-domain-v2"
+    assert body["transformation"]["created_objects"] == 2
+    assert body["transformation"]["reused_objects"] == 0
     duplicate_import = client.post(
         "/api/imports/kraken?transform=true",
         files={"file": ("ledger.csv", ledger.encode())},
@@ -695,6 +850,9 @@ def test_import_transform_manual_valuation_and_superseding(client: TestClient) -
     assert (
         duplicate_body["transformation"]["run_id"] == body["transformation"]["run_id"]
     )
+    assert duplicate_body["transformation"]["contract_version"] == "kraken-domain-v2"
+    assert duplicate_body["transformation"]["created_objects"] == 2
+    assert duplicate_body["transformation"]["reused_objects"] == 0
     assert client.get("/api/transformations").json()["total"] == 1
     assert client.get("/api/events?event_type=acquisition").json()["total"] == 1
     assert client.get("/api/valuation-requirements").json()["total"] == 1
@@ -724,20 +882,38 @@ def test_import_transform_manual_valuation_and_superseding(client: TestClient) -
         },
     )
     assert manual.status_code == 200
-    first = client.post("/api/valuations")
+    first = client.post("/api/valuations?method_version=eur-valuation-v1")
     assert first.status_code == 200
     assert first.json()["resolved"] == 1
+    assert first.json()["method_version"] == "eur-valuation-v1"
+    assert first.json()["gross_income_total_eur"] == "0"
+    assert first.json()["fee_candidate_total_eur"] == "0"
+    assert first.json()["net_acquisition_total_eur"] == "50000.15432098626543209750"
     assert client.get("/api/valuation-requirements?status=pending").json()["total"] == 0
     decisions = client.get("/api/valuations").json()["items"]
     assert len(decisions) == 1
     assert decisions[0]["method"] == "manual_daily_price"
     assert decisions[0]["eur_value"] == "50000.15432098626543209750"
-    duplicate = client.post("/api/valuations")
+    assert decisions[0]["method_version"] == LEGACY_METHOD_VERSION
+    assert decisions[0]["gross_quantity"] is None
+    assert decisions[0]["gross_income_eur"] is None
+    assert decisions[0]["fee_value_eur"] is None
+    assert decisions[0]["net_quantity"] == "1.25"
+    assert decisions[0]["net_acquisition_value_eur"] == decisions[0]["eur_value"]
+    duplicate = client.post("/api/valuations?method_version=eur-valuation-v1")
     assert duplicate.status_code == 200
     assert duplicate.json()["checked"] == 0
-    replacement = client.post("/api/valuations?method_version=eur-valuation-v2")
+    replacement = client.post("/api/valuations")
     assert replacement.status_code == 200
     assert replacement.json()["resolved"] == 1
+    assert replacement.json()["method_version"] == METHOD_VERSION
+    assert replacement.json()["gross_income_total_eur"] == (
+        "50000.15432098626543209750"
+    )
+    assert replacement.json()["fee_candidate_total_eur"] == "0"
+    assert replacement.json()["net_acquisition_total_eur"] == (
+        "50000.15432098626543209750"
+    )
     decisions = client.get("/api/valuations").json()["items"]
     assert len(decisions) == 2
     old = next(item for item in decisions if item["version"] == 1)
@@ -754,6 +930,17 @@ def test_import_transform_manual_valuation_and_superseding(client: TestClient) -
     assert provenance["daily_price"]["id"] == manual.json()["id"]
     assert provenance["provider_evidence_id"] is None
     assert provenance["provider_evidence"] is None
+    assert provenance["gross_quantity"] == "1.25"
+    assert provenance["fee_quantity"] == "0"
+    assert provenance["net_quantity"] == "1.25"
+    assert provenance["gross_income_eur"] == "50000.15432098626543209750"
+    assert provenance["fee_value_eur"] == "0E-18"
+    assert provenance["net_acquisition_value_eur"] == ("50000.15432098626543209750")
+    assert provenance["valuation_basis"] == "staking_reward_components_v2"
+    assert provenance["fee_tax_classification"] == "not_applicable"
+    assert provenance["fee_tax_review_status"] == "not_required"
+    assert provenance["method_version"] == METHOD_VERSION
+    assert provenance["rounding_rule"] == "ROUND_HALF_UP_DISPLAY_ONLY"
     assert provenance["audit"]
     dashboard = client.get("/api/dashboard").json()
     assert dashboard["imports"] == 2
@@ -762,6 +949,120 @@ def test_import_transform_manual_valuation_and_superseding(client: TestClient) -
     assert dashboard["resolved_valuations"] == 1
     assert client.get("/api/events?event_type=acquisition").json()["total"] == 1
     assert client.get("/api/events?event_type=trade").json()["total"] == 0
+
+
+def test_staking_reward_api_reports_gross_fee_and_net_values(
+    client: TestClient,
+) -> None:
+    reward = (
+        "txid,time,type,asset,amount,fee,subtype\n"
+        "FEE-REWARD,2026-01-02 03:04:05,earn,XXBT,1,0.1,reward\n"
+    )
+    imported = client.post(
+        "/api/imports/kraken?transform=true",
+        files={"file": ("reward.csv", reward.encode())},
+    )
+    assert imported.status_code == 200
+    assert (
+        client.post(
+            "/api/prices/manual",
+            json={
+                "asset": "BTC",
+                "date": "2026-01-02",
+                "price_eur": "100",
+                "source": "Synthetischer Tagesbeleg",
+                "reason": "Komponentenvertrag",
+            },
+        ).status_code
+        == 200
+    )
+
+    response = client.post("/api/valuations")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": response.json()["id"],
+        "status": "completed",
+        "method_version": "eur-valuation-v2",
+        "checked": 1,
+        "resolved": 1,
+        "reviews": 0,
+        "gross_income_total_eur": "100",
+        "fee_candidate_total_eur": "10.0",
+        "net_acquisition_total_eur": "90.0",
+    }
+    item = client.get("/api/valuations").json()["items"][0]
+    assert item["quantity"] == item["net_quantity"] == "0.9"
+    assert item["gross_quantity"] == "1"
+    assert item["fee_quantity"] == "0.1"
+    assert item["gross_income_eur"] == "100"
+    assert item["fee_value_eur"] == "10.0"
+    assert item["net_acquisition_value_eur"] == item["eur_value"] == "90.0"
+    assert item["fee_tax_classification"] == "werbungskosten_candidate"
+    assert item["fee_tax_review_status"] == "review_required"
+    assert client.get("/api/inventory-lots").json()["total"] == 0
+    assert client.get("/api/tax-calculations").json()["total"] == 0
+    repeated = client.post("/api/valuations")
+    assert repeated.json()["checked"] == repeated.json()["resolved"] == 0
+
+    calculated = client.post("/api/tax-calculations", json={"year": 2026})
+    assert calculated.status_code == 200
+    assert calculated.json()["status"] == "completed_with_review"
+    inventory = client.get("/api/inventory-lots?year=2026").json()["items"]
+    assert inventory[0]["original_quantity"] == "0.9"
+    assert inventory[0]["acquisition_value_eur"] == "90.0"
+    journal = client.get("/api/tax-journal?year=2026").json()["items"]
+    earn = next(entry for entry in journal if entry["type"] == "earn_inflow")
+    assert earn["quantity"] == "0.9"
+    assert earn["eur_value"] == "100"
+    reviews = client.get("/api/reviews").json()["items"]
+    assert any(
+        item["code"] == "tax_staking_platform_fee_candidate_review" for item in reviews
+    )
+    summary = client.get("/api/tax-summary?year=2026").json()
+    assert summary["gross_staking_income"] == "100"
+    assert summary["staking_fee_candidates"] == "10.0"
+    assert summary["provisional_net_staking_income"] == "90.0"
+
+
+def test_historical_v1_reward_is_not_used_as_unverified_gross_tax_income(
+    client: TestClient,
+) -> None:
+    reward = (
+        "txid,time,type,asset,amount,fee,subtype\n"
+        "LEGACY-VALUE,2026-01-02 03:04:05,earn,XXBT,1,0,reward\n"
+    )
+    assert (
+        client.post(
+            "/api/imports/kraken?transform=true",
+            files={"file": ("legacy.csv", reward.encode())},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/prices/manual",
+            json={
+                "asset": "BTC",
+                "date": "2026-01-02",
+                "price_eur": "100",
+                "source": "Historischer Testbeleg",
+                "reason": "v1-Reproduzierbarkeit",
+            },
+        ).status_code
+        == 200
+    )
+    valued = client.post("/api/valuations?method_version=eur-valuation-v1")
+    assert valued.status_code == 200
+    assert valued.json()["net_acquisition_total_eur"] == "100"
+    calculated = client.post("/api/tax-calculations", json={"year": 2026})
+    assert calculated.status_code == 200
+    assert calculated.json()["status"] == "completed_with_review"
+    journal = client.get("/api/tax-journal?year=2026").json()["items"]
+    assert journal[0]["type"] == "review"
+    assert journal[0]["eur_value"] == "0"
+    reviews = client.get("/api/reviews").json()["items"]
+    assert any(item["code"] == "tax_reward_gross_income_missing" for item in reviews)
     assert client.get("/api/valuations?date_from=2026-02-01").json()["total"] == 0
     assert (
         client.get(
@@ -874,6 +1175,236 @@ def test_missing_requirement_domain_object_becomes_review() -> None:
     assert result["resolved"] == 0
     assert result["reviews"] == 1
     assert result["status"] == "completed_with_review"
+
+
+@pytest.mark.parametrize(
+    ("gross", "fee_asset", "reason_code"),
+    [
+        ("1.1", "BTC", "valuation_reward_quantity_inconsistent"),
+        ("1", "ETH", "valuation_reward_fee_asset_mismatch"),
+    ],
+)
+def test_reward_component_conflict_becomes_review_before_price_lookup(
+    gross: str, fee_asset: str, reason_code: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.entities import AuditEvent
+    from app.core.tax import InventoryLot, TaxCalculationRun
+    from app.core.transformation import (
+        AcquisitionLot,
+        AcquisitionType,
+        TaxTreatmentHint,
+    )
+
+    provider_calls: list[str] = []
+
+    def observations_not_expected(
+        _provider: CoinGeckoProvider,
+        asset: str,
+        _target_currency: str,
+        _start: datetime,
+        _end: datetime,
+    ) -> tuple[PriceObservation, ...]:
+        provider_calls.append(asset)
+        return ()
+
+    monkeypatch.setattr(CoinGeckoProvider, "observations", observations_not_expected)
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    lot = AcquisitionLot(
+        stable_key="reward-conflict",
+        payload_hash="a" * 64,
+        asset_raw_code="BTC",
+        asset_code="BTC",
+        asset_mapping_version="synthetic-v1",
+        quantity=Decimal("0.9"),
+        gross_quantity=Decimal(gross),
+        fee_quantity=Decimal("0.1"),
+        fee_asset=fee_asset,
+        occurred_at=NOW,
+        acquisition_type=AcquisitionType.STAKING_REWARD,
+        provider="kraken",
+        account_scope="default",
+        wallet_scope="kraken-spot",
+        external_id="synthetic-conflict",
+        transformation_version="kraken-domain-v2",
+        valuation_status=ValuationStatus.VALUATION_REQUIRED,
+        tax_treatment_hint=TaxTreatmentHint.PASSIVE_STAKING_REWARD,
+    )
+    requirement = ValuationRequirement(
+        asset_code="BTC",
+        target_currency="EUR",
+        valuation_at=NOW,
+        method=ValuationMethod.DAILY_AVERAGE,
+        status=ValuationStatus.VALUATION_REQUIRED,
+        reason_code="reward_inflow",
+        domain_object_type="AcquisitionLot",
+        domain_object_id=lot.id,
+        transformation_run_id=uuid4(),
+    )
+    with sessions() as database:
+        database.add_all((lot, requirement))
+        database.commit()
+        result = run_valuations(database, method_version=METHOD_VERSION)
+        unchanged_lot = database.get(AcquisitionLot, lot.id)
+        assert unchanged_lot is not None
+        assert unchanged_lot.quantity == Decimal("0.9")
+        assert unchanged_lot.gross_quantity == Decimal(gross)
+        assert unchanged_lot.fee_quantity == Decimal("0.1")
+        assert unchanged_lot.fee_asset == fee_asset
+        assert provider_calls == []
+        assert database.scalar(select(func.count()).select_from(DailyPrice)) == 0
+        assert database.scalar(select(func.count()).select_from(ProviderEvidence)) == 0
+        assert database.scalar(select(func.count()).select_from(ValuationDecision)) == 0
+        assert database.scalar(select(func.count()).select_from(InventoryLot)) == 0
+        assert database.scalar(select(func.count()).select_from(TaxCalculationRun)) == 0
+        review_audits = tuple(
+            event
+            for event in database.scalars(select(AuditEvent))
+            if event.event_type == "valuation.review_created"
+        )
+        assert review_audits[-1].metadata["reason_code"] == reason_code
+        assert review_audits[-1].metadata["method_version"] == METHOD_VERSION
+        assert review_audits[-1].metadata["status"] == "review_required"
+        assert review_audits[-1].metadata["valuation_basis"] == (
+            "staking_reward_components_v2"
+        )
+        review_id = review_audits[-1].id
+
+        repeated = run_valuations(database, method_version=METHOD_VERSION)
+        repeated_reviews = tuple(
+            event
+            for event in database.scalars(select(AuditEvent))
+            if event.event_type == "valuation.review_created"
+        )
+        assert len(repeated_reviews) == 1
+        assert repeated["checked"] == repeated["resolved"] == repeated["reviews"] == 0
+
+    def dependency() -> object:
+        with sessions() as database:
+            yield database
+
+    app.dependency_overrides[get_session] = dependency
+    try:
+        with TestClient(app) as review_client:
+            listed = review_client.get("/api/reviews").json()["items"]
+            assert any(item["code"] == reason_code for item in listed)
+            detail = review_client.get(f"/api/reviews/{review_id}")
+            assert detail.status_code == 200
+            assert detail.json()["code"] == reason_code
+            valuations = review_client.get("/api/valuations").json()["items"]
+            valuation_review = next(
+                item for item in valuations if item["id"] == str(review_id)
+            )
+            assert valuation_review["status"] == "review_required"
+            assert valuation_review["reason_code"] == reason_code
+            assert valuation_review["unit_price_eur"] is None
+            valuation_detail = review_client.get(f"/api/valuations/{review_id}")
+            assert valuation_detail.status_code == 200
+            assert valuation_detail.json()["daily_price"] is None
+            assert valuation_detail.json()["provider_evidence"] is None
+    finally:
+        app.dependency_overrides.clear()
+    assert result["checked"] == result["reviews"] == 1
+    assert result["resolved"] == 0
+    assert result["status"] == "completed_with_review"
+
+
+def test_55_reward_matrix_reuses_one_price_per_asset_and_creates_no_tax_state() -> None:
+    from app.core.tax import InventoryLot, TaxCalculationRun
+    from app.core.transformation import (
+        AcquisitionLot,
+        AcquisitionType,
+        TaxTreatmentHint,
+    )
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    assets = ("ADA", "ATOM", "BTC", "DOT", "EIGEN", "ETH", "GRT", "KAVA", "XTZ")
+    price_date = date(2026, 1, 2)
+    with sessions() as database:
+        transformation = TransformationRun(
+            contract_version="kraken-domain-v2",
+            status=TransformationStatus.COMPLETED,
+            started_at=NOW,
+            completed_at=NOW,
+            actor_id="test-suite",
+            checked_records=55,
+            created_objects=110,
+        )
+        database.add(transformation)
+        for asset in assets:
+            database.add(
+                DailyPrice(
+                    asset_code=asset,
+                    price_date=price_date,
+                    unit_price_eur=Decimal("10"),
+                    method=PriceMethod.MANUAL_DAILY_PRICE,
+                    source="Synthetische Matrix",
+                    provider="manual",
+                    provider_contract_version="manual-v1",
+                    evidence_hash=(asset.lower() * 64)[:64],
+                    sample_count=1,
+                    fetched_at=NOW,
+                    status=ValuationDecisionStatus.RESOLVED,
+                )
+            )
+        for index in range(55):
+            asset = assets[index % len(assets)]
+            lot = AcquisitionLot(
+                stable_key=f"matrix-{index}",
+                payload_hash=f"{index:064x}",
+                asset_raw_code=asset,
+                asset_code=asset,
+                asset_mapping_version="kraken-assets-v2",
+                quantity=Decimal("0.9"),
+                gross_quantity=Decimal("1"),
+                fee_quantity=Decimal("0.1"),
+                fee_asset=asset,
+                occurred_at=datetime(2026, 1, 2, index % 24, tzinfo=UTC),
+                acquisition_type=AcquisitionType.STAKING_REWARD,
+                provider="kraken",
+                account_scope="default",
+                wallet_scope="kraken-spot",
+                external_id=f"matrix-{index}",
+                transformation_version="kraken-domain-v2",
+                valuation_status=ValuationStatus.VALUATION_REQUIRED,
+                tax_treatment_hint=TaxTreatmentHint.PASSIVE_STAKING_REWARD,
+            )
+            database.add(lot)
+            database.add(
+                ValuationRequirement(
+                    asset_code=asset,
+                    target_currency="EUR",
+                    valuation_at=lot.occurred_at,
+                    method=ValuationMethod.DAILY_AVERAGE,
+                    status=ValuationStatus.VALUATION_REQUIRED,
+                    reason_code="reward_inflow",
+                    domain_object_type="AcquisitionLot",
+                    domain_object_id=lot.id,
+                    transformation_run_id=transformation.id,
+                )
+            )
+        database.commit()
+
+        result = run_valuations(database, method_version=METHOD_VERSION)
+
+        decisions = tuple(database.scalars(select(ValuationDecision)))
+        assert result["checked"] == result["resolved"] == 55
+        assert result["reviews"] == 0
+        assert result["gross_income_total_eur"] == "550"
+        assert result["fee_candidate_total_eur"] == "55.0"
+        assert result["net_acquisition_total_eur"] == "495.0"
+        assert len(decisions) == 55
+        assert len({item.provider_object_id for item in decisions}) == len(assets)
+        assert database.scalar(select(func.count()).select_from(DailyPrice)) == 9
+        assert database.scalar(select(func.count()).select_from(InventoryLot)) == 0
+        assert database.scalar(select(func.count()).select_from(TaxCalculationRun)) == 0
 
 
 def test_existing_provider_evidence_is_reused(

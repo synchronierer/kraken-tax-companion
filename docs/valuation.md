@@ -52,3 +52,45 @@ Methodenversion. Providername, Asset-Mappingversion und die konkrete
 Provider-Vertragsversion liegen im Infrastructure-Adapter und werden erst mit
 der unveränderlichen ProviderEvidence persistiert. Damit kennt der Core weder
 CoinGecko noch dessen IDs oder HTTP-Vertrag.
+
+Sprint 3B konsumiert ausschließlich effektive, aufgelöste
+`ValuationDecision`-Nachweise. Native EUR-, manuelle und automatische Werte
+werden gleichartig referenziert; Provider-Evidenz wird im Steuerjournal nicht
+dupliziert. Eine korrigierte Bewertung verändert den fachlichen Snapshot und
+darf einen supersedierenden Steuerberechnungslauf auslösen.
+
+## Staking-Reward-Vertrag v2
+
+`eur-valuation-v1` bleibt der historische Vertrag: `quantity` und
+`eur_value` bilden dort ausschließlich Nettomenge und Netto-Anschaffungswert
+ab. Diese Semantik wird nicht rückwirkend geändert. Der aktive Vertrag
+`eur-valuation-v2` trennt für Staking-Rewards mit demselben Tagespreis:
+
+- `gross_income_eur = gross_quantity * unit_price_eur`,
+- `fee_value_eur = fee_quantity * unit_price_eur`,
+- `net_acquisition_value_eur = net_quantity * unit_price_eur`.
+
+Dabei bleibt `quantity` gleich `net_quantity` und `eur_value` gleich
+`net_acquisition_value_eur`. Steuer- und Exportlogik darf `eur_value` deshalb
+nicht ungeprüft als Rewardertrag verwenden. Intern wird nicht gerundet;
+`ROUND_HALF_UP` gilt weiterhin ausschließlich für finale Centdarstellungen.
+
+Die Mengeninvariante lautet `gross_quantity = net_quantity + fee_quantity`.
+Widersprüche, eine negative oder zu große Gebühr sowie ein abweichendes
+Gebührenasset führen vor dem Preisabruf zu einem Review. Altbestände ohne
+Bruttomenge verwenden dokumentiert Brutto gleich Netto und Gebühr null. Ein
+DailyPrice und eine ProviderEvidence werden je Asset und UTC-Tag nur einmal
+verwendet.
+
+Eine einbehaltene Rewardgebühr wird als
+`werbungskosten_candidate` mit `review_required` dokumentiert. Das ist keine
+endgültige Aussage über ihre steuerliche Abziehbarkeit. Es entsteht weder ein
+erfundenes FeeEvent noch eine fiktive Veräußerung. Migration 0008 ergänzt die
+nullable Komponentenfelder; bestehende v1-Entscheidungen werden nicht
+aufgefüllt oder verändert.
+
+Ein erneuter Lauf derselben Methodenversion erzeugt keine zweite wirksame
+Entscheidung. `refresh_prices=true` kann neue Preise nur für noch offene
+Anforderungen laden; eine bereits entschiedene Anforderung benötigt für eine
+kontrollierte Neubewertung eine neue Methodenversion. Diese erzeugt eine neue
+Decision mit `supersedes_id`, ohne die alte Zeile zu überschreiben.

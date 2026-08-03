@@ -185,6 +185,7 @@ class RawImportRecord:
     created_at: datetime = field(default_factory=utc_now)
     sequence_number: int = 0
     external_id: str | None = None
+    canonical_key: str | None = None
     technical_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -196,6 +197,8 @@ class RawImportRecord:
             raise ValueError("sequence_number must not be negative.")
         if self.external_id is not None:
             self.external_id = required_text(self.external_id, "external_id")
+        if self.canonical_key is not None:
+            self.canonical_key = required_text(self.canonical_key, "canonical_key")
         self.technical_metadata = deepcopy(self.technical_metadata)
 
 

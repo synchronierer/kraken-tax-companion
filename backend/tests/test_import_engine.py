@@ -250,12 +250,91 @@ def test_generic_batch_import_and_duplicate_result() -> None:
     assert duplicate.outcome is ImportOutcome.DUPLICATE
     assert duplicate.skipped is True
     assert duplicate.duplicate_of_session_id == first.session_id
+    assert duplicate.reused_count == 2
+    assert duplicate.reused_session_ids == (first.session_id,)
     with factory() as database:
         stored = tuple(database.scalars(select(RawImportRecord)))
         assert [item.sequence_number for item in stored] == [0, 1]
         assert stored[0].external_id == "a"
         assert stored[1].technical_metadata == {"line": 2}
         assert database.scalar(select(func.count()).select_from(AuditEvent)) == 6
+
+
+def test_canonical_record_identity_reuses_transport_and_rejects_conflict() -> None:
+    factory = session_factory()
+    engine = service(factory)
+    key = "kraken:spot_ledger:L1"
+    first = engine.import_records(
+        context=context_for(import_session()),
+        records=[
+            RawRecordInput(
+                payload={"transport": "csv"},
+                canonical_key=key,
+                technical_metadata={"canonical_fingerprint": "same"},
+            )
+        ],
+    )
+    reused = engine.import_records(
+        context=context_for(import_session()),
+        records=[
+            RawRecordInput(
+                payload={"transport": "api"},
+                canonical_key=key,
+                technical_metadata={"canonical_fingerprint": "same"},
+            )
+        ],
+    )
+    conflict = engine.import_records(
+        context=context_for(import_session()),
+        records=[
+            RawRecordInput(
+                payload={"transport": "api", "changed": True},
+                canonical_key=key,
+                technical_metadata={"canonical_fingerprint": "different"},
+            )
+        ],
+    )
+    assert first.accepted_count == 1
+    assert reused.outcome is ImportOutcome.DUPLICATE
+    assert reused.reused_count == 1
+    assert reused.reused_session_ids == (first.session_id,)
+    assert conflict.outcome is ImportOutcome.FAILED
+    assert conflict.errors[0].code == "canonical_record_conflict"
+    with factory() as database:
+        assert database.scalar(select(func.count()).select_from(RawImportRecord)) == 1
+
+
+def test_canonical_duplicates_inside_one_batch_are_deduplicated_or_rejected() -> None:
+    factory = session_factory()
+    engine = service(factory)
+    key = "kraken:spot_ledger:L1"
+    same = RawRecordInput(
+        payload={"record": 1},
+        canonical_key=key,
+        technical_metadata={"canonical_fingerprint": "same"},
+    )
+    duplicate = engine.import_records(
+        context=context_for(import_session()), records=[same, same]
+    )
+    assert duplicate.accepted_count == 1
+    assert duplicate.reused_count == 1
+    conflict = engine.import_records(
+        context=context_for(import_session()),
+        records=[
+            RawRecordInput(
+                payload={"record": 2},
+                canonical_key="kraken:spot_ledger:L2",
+                technical_metadata={"canonical_fingerprint": "first"},
+            ),
+            RawRecordInput(
+                payload={"record": 3},
+                canonical_key="kraken:spot_ledger:L2",
+                technical_metadata={"canonical_fingerprint": "second"},
+            ),
+        ],
+    )
+    assert conflict.outcome is ImportOutcome.FAILED
+    assert conflict.errors[0].code == "canonical_record_conflict"
 
 
 def test_generic_batch_returns_structured_failure_and_allows_explicit_retry() -> None:

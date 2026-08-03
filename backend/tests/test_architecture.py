@@ -82,13 +82,14 @@ def test_transformation_architecture_has_no_forbidden_tax_layers() -> None:
     assert "taxjournal" not in kraken_mapper.lower()
 
 
-def test_sprint_3a_layer_boundaries_and_non_goals() -> None:
+def test_sprint_3b_layer_boundaries_and_non_goals() -> None:
     root = Path(__file__).parents[1]
     app_root = root / "app"
     core_sources = "\n".join(
         path.read_text(encoding="utf-8") for path in (app_root / "core").glob("*.py")
     ).lower()
     router_source = (app_root / "api" / "workflows.py").read_text(encoding="utf-8")
+    tax_router_source = (app_root / "api" / "tax.py").read_text(encoding="utf-8")
     infrastructure_sources = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (app_root / "infrastructure").glob("*.py")
@@ -101,11 +102,17 @@ def test_sprint_3a_layer_boundaries_and_non_goals() -> None:
     for forbidden in ("fastapi", "sqlalchemy", "httpx", "coingecko"):
         assert forbidden not in core_sources
     assert "quantity * unit_price" not in router_source
+    assert "disposal_proceeds_eur -" not in tax_router_source
+    assert "remaining_quantity -=" not in tax_router_source
     assert "react" not in infrastructure_sources
     assert "dangerouslySetInnerHTML" not in frontend_sources
     assert "eur_value =" not in frontend_sources
-    for deferred_feature in ("fifo(", "tax_journal", "execute_sale"):
+    for deferred_feature in ("execute_sale", "kraken private", "elster"):
         assert deferred_feature not in (core_sources + frontend_sources.lower())
+    tax_core = (app_root / "core" / "tax.py").read_text(encoding="utf-8").lower()
+    assert "calculate_fifo" in tax_core
+    assert "float(" not in tax_core
+    assert "app.infrastructure" not in tax_core
 
 
 def test_database_session_initializes_imperative_mappings_centrally() -> None:

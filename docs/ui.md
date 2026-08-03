@@ -39,3 +39,21 @@ der echte TypeScript-API-Client mit dem bereits von Vite verwendeten
 Netzwerkfehlern sowie frameworkarme Anzeige-, Validierungs-, Review-,
 Pagination- und Secretfilterregeln. Dies sind Integrations- und
 Vertragstests, keine erfundenen Browsertests.
+
+## Sprint-3B-Seiten
+
+Die Navigation enthält zusätzlich Steuerübersicht, FIFO-Zuordnungen, Bestände,
+Steuerjournal und Exporte. Tabellen öffnen echte Backenddetails. Exporte werden
+für einen abgeschlossenen Lauf erzeugt und über den Same-Origin-Pfad geladen.
+Gewinn, Verlust, Gebühren, Bestand und Haltedauer werden im Browser weder neu
+berechnet noch gerundet.
+
+## Kraken API
+
+Die Seite „Kraken API“ bietet Verbindungsstatus, Ledger-CSV-Auswahl,
+reproduzierbaren CSV–API-Abgleich und den bestätigten Import. Der Browser erhält
+keine Schlüssel. Der Importknopf wird erst nach einem importbereiten Vergleich
+und einer ausdrücklichen Digest-Bestätigung aktiv. Der Digest wird beim Import
+serverseitig durch einen neuen Live-Abruf geprüft; ein veralteter Vergleich
+führt zu HTTP 409. Standardmäßig startet der Import keine Transformation und
+niemals Bewertung oder FIFO.

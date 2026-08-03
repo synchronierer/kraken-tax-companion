@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from app import models
 from app.adapters.kraken.assets import (
     ASSET_MAPPING_VERSION,
+    LEGACY_ASSET_MAPPING_VERSION,
+    normalize_kraken_asset,
     resolve_asset,
+    resolve_asset_legacy_v1,
     resolve_pair,
 )
 from app.adapters.kraken.transformation import (
@@ -23,6 +26,7 @@ from app.core.entities import (
     RawImportRecord,
 )
 from app.core.identifiers import new_id
+from app.core.tax import InventoryLot, TaxCalculationRun
 from app.core.transformation import (
     AcquisitionLot,
     DecisionType,
@@ -38,6 +42,7 @@ from app.core.transformation import (
     ValuationRequirement,
     non_negative_decimal,
 )
+from app.core.valuation import ValuationDecision
 from app.database.base import Base
 from app.database.mappings import transformation_decisions
 from app.database.unit_of_work import SqlAlchemyUnitOfWork
@@ -180,12 +185,20 @@ def test_asset_registry_is_explicit_and_versioned(raw: str, canonical: str) -> N
     assert asset.review_reason is None
 
 
-def test_unknown_asset_is_preserved_without_prefix_heuristic() -> None:
+def test_new_asset_is_identity_mapped_and_legacy_v1_remains_auditable() -> None:
     asset = resolve_asset("XUNKNOWN")
     assert asset.raw_code == "XUNKNOWN"
-    assert asset.canonical_code is None
-    assert asset.mapping_status is MappingStatus.UNRESOLVED
-    assert asset.review_reason == "asset_alias_unknown"
+    assert asset.canonical_code == "XUNKNOWN"
+    assert asset.mapping_status is MappingStatus.MAPPED
+    assert asset.review_reason is None
+    legacy = resolve_asset_legacy_v1("XUNKNOWN")
+    assert legacy.canonical_code is None
+    assert legacy.mapping_version == LEGACY_ASSET_MAPPING_VERSION
+    assert legacy.mapping_status is MappingStatus.UNRESOLVED
+    assert legacy.review_reason == "asset_alias_unknown"
+    assert resolve_asset_legacy_v1("ZGBP").canonical_code is None
+    assert resolve_asset("ZGBP").canonical_code == "GBP"
+    assert normalize_kraken_asset("XUNKNOWN").normalized_asset == "XUNKNOWN"
 
 
 @pytest.mark.parametrize(
@@ -202,7 +215,8 @@ def test_pair_resolution_is_conservative(raw: str, expected: tuple[str, str]) ->
     assert pair.raw_pair == raw
     assert (pair.base.canonical_code, pair.quote.canonical_code) == expected
     assert resolve_pair("BTC/EUR/USD") is None
-    assert resolve_pair("BTC/XUNKNOWN") is None
+    assert resolve_pair("BTC/XUNKNOWN") is not None
+    assert resolve_pair("BTC/X!") is None
     assert resolve_pair("UNKNOWNPAIR") is None
 
 
@@ -449,16 +463,151 @@ def test_projection_idempotency_conflict_and_new_version() -> None:
     assert first.rewards == 1
     assert duplicate.rewards == 0
     assert conflict.conflicts == 1
-    assert reprocessed.rewards == 1
+    assert reprocessed.rewards == 0
+    assert reprocessed.reused_objects == 1
     with factory() as database:
-        assert database.scalar(select(func.count()).select_from(AcquisitionLot)) == 2
+        assert database.scalar(select(func.count()).select_from(AcquisitionLot)) == 1
         duplicate_decision = database.scalar(
             select(TransformationDecision).where(
                 transformation_decisions.c.transformation_run_id == duplicate.run_id
             )
         )
         assert duplicate_decision is not None
-        assert duplicate_decision.decision_type is DecisionType.DUPLICATE
+        assert duplicate_decision.decision_type is DecisionType.DOMAIN_EVENT_REUSED
+
+
+def test_v2_reuses_v1_rewards_and_maps_the_real_asset_matrix() -> None:
+    factory = database_factory()
+    current_assets = (
+        "KAVA21.S",
+        "GRT28.S",
+        "XTZ.S",
+        "DOT28.S",
+        "ATOM21.S",
+        "ADA.S",
+        "XXBT.B",
+        "KAVA",
+        "GRT",
+        "XETH.B",
+        "EIGEN",
+        "XTZ.B",
+        "DOT",
+    )
+    records = [
+        ledger(f"KNOWN-{index}", "earn", "1", asset="XETH", subtype="reward")
+        for index in range(4)
+    ]
+    records.extend(
+        ledger(
+            f"NEW-{index}",
+            "earn",
+            "1",
+            asset=current_assets[index % len(current_assets)],
+            fee="0.1" if index == 0 else "0",
+            subtype="reward",
+        )
+        for index in range(51)
+    )
+    session_id = store_records(factory, records)
+
+    legacy = transform(factory, session_id, version="kraken-domain-v1")
+    assert legacy.checked_records == 55
+    assert legacy.acquisitions == 4
+    assert legacy.review_cases == 51
+    with factory() as database:
+        legacy_decisions = tuple(
+            database.scalars(
+                select(TransformationDecision).where(
+                    transformation_decisions.c.transformation_run_id == legacy.run_id
+                )
+            )
+        )
+        assert (
+            sum(
+                decision.reason_code == "asset_alias_unknown"
+                for decision in legacy_decisions
+            )
+            == 51
+        )
+
+    current = transform(factory, session_id, version="kraken-domain-v2")
+    assert current.status is TransformationStatus.COMPLETED
+    assert current.checked_records == 55
+    assert current.acquisitions == 51
+    assert current.reused_objects == 4
+    assert current.review_cases == current.conflicts == 0
+    assert current.valuation_requirements == 51
+
+    repeated = transform(factory, session_id, version="kraken-domain-v2")
+    assert repeated.status is TransformationStatus.COMPLETED
+    assert repeated.checked_records == 55
+    assert repeated.acquisitions == 0
+    assert repeated.reused_objects == 55
+    assert repeated.review_cases == repeated.conflicts == 0
+    assert repeated.valuation_requirements == 0
+
+    with factory() as database:
+        acquisitions = tuple(database.scalars(select(AcquisitionLot)))
+        assert len(acquisitions) == 55
+        assert database.scalar(select(func.count()).select_from(ValuationDecision)) == 0
+        assert database.scalar(select(func.count()).select_from(InventoryLot)) == 0
+        assert database.scalar(select(func.count()).select_from(TaxCalculationRun)) == 0
+        assert {item.asset_code for item in acquisitions}.issuperset(
+            {"ADA", "ATOM", "BTC", "DOT", "EIGEN", "ETH", "GRT", "KAVA", "XTZ"}
+        )
+        fee_reward = next(
+            item for item in acquisitions if item.external_id.endswith("NEW-0")
+        )
+        assert fee_reward.gross_quantity == Decimal("1")
+        assert fee_reward.fee_quantity == Decimal("0.1")
+        assert fee_reward.quantity == Decimal("0.9")
+        assert database.scalar(select(func.count()).select_from(FeeEvent)) == 0
+        current_decisions = tuple(
+            database.scalars(
+                select(TransformationDecision).where(
+                    transformation_decisions.c.transformation_run_id == current.run_id
+                )
+            )
+        )
+        assert len(current_decisions) == 55
+        assert (
+            sum(
+                decision.decision_type is DecisionType.DOMAIN_EVENT_REUSED
+                for decision in current_decisions
+            )
+            == 4
+        )
+        assert all(
+            decision.contract_version == "kraken-domain-v2"
+            for decision in current_decisions
+        )
+        assert not any(
+            decision.reason_code == "asset_alias_unknown"
+            for decision in current_decisions
+        )
+        persisted_legacy_decisions = tuple(
+            database.scalars(
+                select(TransformationDecision).where(
+                    transformation_decisions.c.transformation_run_id == legacy.run_id
+                )
+            )
+        )
+        assert persisted_legacy_decisions == legacy_decisions
+
+
+def test_v2_rejects_only_a_genuinely_invalid_reward_asset() -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [ledger("INVALID", "earn", "1", asset="ADA/../../", subtype="reward")],
+    )
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
+    assert result.checked_records == result.review_cases == 1
+    assert result.acquisitions == result.valuation_requirements == 0
+    assert result.problems[0].code == "asset_alias_unknown"
 
 
 def test_trade_projection_idempotency_and_conflict() -> None:

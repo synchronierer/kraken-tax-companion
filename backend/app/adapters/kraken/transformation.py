@@ -11,6 +11,7 @@ from app.adapters.kraken.assets import (
     ASSET_MAPPING_VERSION,
     FIAT_ASSETS,
     resolve_asset,
+    resolve_asset_legacy_v1,
     resolve_pair,
 )
 from app.core.entities import AuditActorType, AuditEvent, RawImportRecord
@@ -18,11 +19,13 @@ from app.core.time import utc_now
 from app.core.transformation import (
     AcquisitionLot,
     AcquisitionType,
+    AssetIdentity,
     DecisionType,
     DisposalEvent,
     DisposalType,
     DomainProvenance,
     FeeEvent,
+    MappingStatus,
     ReconciliationStatus,
     TaxTreatmentHint,
     TradeExecution,
@@ -50,7 +53,8 @@ INTERNAL_SUBTYPES = frozenset(
         "spotfromstaking",
     }
 )
-TRANSFORMATION_CONTRACT_VERSION = "kraken-domain-v1"
+TRANSFORMATION_CONTRACT_VERSION = "kraken-domain-v2"
+DOMAIN_IDENTITY_VERSION = "kraken-domain-v1"
 PROVIDER = "kraken"
 ACCOUNT_SCOPE = "default"
 WALLET_SCOPE = "kraken-spot"
@@ -85,6 +89,7 @@ class TransformationResult:
     review_cases: int
     conflicts: int
     valuation_requirements: int
+    reused_objects: int
     problems: tuple[TransformationProblem, ...]
 
 
@@ -99,6 +104,7 @@ class _Counters:
     reviews: int = 0
     conflicts: int = 0
     valuations: int = 0
+    reused: int = 0
 
     @property
     def created(self) -> int:
@@ -218,6 +224,7 @@ class KrakenTransformationService:
                 review_cases=0,
                 conflicts=0,
                 valuation_requirements=0,
+                reused_objects=0,
                 problems=(
                     TransformationProblem(
                         code="transformation_persistence_error",
@@ -239,6 +246,7 @@ class KrakenTransformationService:
             review_cases=counters.reviews,
             conflicts=counters.conflicts,
             valuation_requirements=counters.valuations,
+            reused_objects=counters.reused,
             problems=tuple(problems),
         )
 
@@ -318,7 +326,7 @@ class KrakenTransformationService:
                 "Ledger spend is linked to the grouped instant exchange.",
             )
             return
-        asset = resolve_asset(values["asset"])
+        asset = _record_asset(record, values["asset"], run.contract_version)
         if asset.canonical_code is None:
             self._review(unit, run, record, counters, problems, "asset_alias_unknown")
             return
@@ -442,7 +450,7 @@ class KrakenTransformationService:
         counters: _Counters,
         problems: list[TransformationProblem],
     ) -> None:
-        asset = resolve_asset(values["asset"])
+        asset = _record_asset(record, values["asset"], run.contract_version)
         if asset.canonical_code is None:
             self._review(unit, run, record, counters, problems, "asset_alias_unknown")
             return
@@ -533,6 +541,7 @@ class KrakenTransformationService:
                 pair.base.canonical_code or pair.base.raw_code,
                 pair.quote.canonical_code or pair.quote.raw_code,
             },
+            run.contract_version,
         )
         if reconciliation is ReconciliationStatus.CONFLICT:
             self._review(
@@ -717,7 +726,10 @@ class KrakenTransformationService:
 
     @staticmethod
     def _reconciliation(
-        unit: UnitOfWork, references: tuple[str, ...], pair_assets: set[str]
+        unit: UnitOfWork,
+        references: tuple[str, ...],
+        pair_assets: set[str],
+        contract_version: str,
     ) -> ReconciliationStatus:
         if not references:
             return ReconciliationStatus.NOT_REQUIRED
@@ -727,7 +739,7 @@ class KrakenTransformationService:
             found += bool(records)
             for record in records:
                 raw_asset = _values(record).get("asset", "")
-                asset = resolve_asset(raw_asset)
+                asset = _record_asset(record, raw_asset, contract_version)
                 if asset.canonical_code not in pair_assets:
                     return ReconciliationStatus.CONFLICT
         if found == len(references):
@@ -756,14 +768,15 @@ class KrakenTransformationService:
                     unit,
                     run,
                     record,
-                    DecisionType.DUPLICATE,
-                    "projection_already_exists",
+                    DecisionType.DOMAIN_EVENT_REUSED,
+                    "domain_event_reused",
                     (
-                        "The same external record and transformation version "
-                        "already exist."
+                        "The same external record already has an identical "
+                        "domain projection."
                     ),
                     existing.id,
                 )
+                counters.reused += 1
                 self._audit(
                     unit,
                     run,
@@ -877,8 +890,9 @@ class KrakenTransformationService:
 
     @staticmethod
     def _stable(record: RawImportRecord, event_type: str, contract_version: str) -> str:
+        del contract_version
         external = record.external_id or f"raw:{record.id}"
-        return f"{PROVIDER}|{external}|{event_type}|{contract_version}"
+        return f"{PROVIDER}|{external}|{event_type}|{DOMAIN_IDENTITY_VERSION}"
 
     @staticmethod
     def _provenance(
@@ -946,6 +960,34 @@ def _values(record: RawImportRecord) -> dict[str, str]:
     return {
         str(key).strip().lower(): str(value) for key, value in record.payload.items()
     }
+
+
+def _record_asset(
+    record: RawImportRecord, raw_asset: str, contract_version: str
+) -> AssetIdentity:
+    if contract_version == DOMAIN_IDENTITY_VERSION:
+        return resolve_asset_legacy_v1(raw_asset)
+    canonical = record.technical_metadata.get("canonical_asset")
+    mapping_version = record.technical_metadata.get("asset_mapping_version")
+    normalized_asset = (
+        canonical.get("normalized_asset") if isinstance(canonical, dict) else None
+    )
+    if (
+        isinstance(canonical, dict)
+        and canonical.get("raw_asset") == raw_asset
+        and isinstance(normalized_asset, str)
+        and bool(normalized_asset)
+        and canonical.get("is_unambiguous") is True
+        and isinstance(mapping_version, str)
+        and bool(mapping_version)
+    ):
+        return AssetIdentity(
+            raw_code=raw_asset,
+            canonical_code=normalized_asset,
+            mapping_version=mapping_version,
+            mapping_status=MappingStatus.MAPPED,
+        )
+    return resolve_asset(raw_asset)
 
 
 def _timestamp(value: str) -> datetime:

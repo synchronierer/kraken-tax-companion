@@ -8,6 +8,16 @@ Monorepo enthält ein FastAPI-Backend, eine React-Oberfläche, Alembic-Migration
 und Docker-Definitionen. Die Anwendung bereitet Nachweise auf und erteilt keine
 Steuerberatung.
 
+## Kraken-Ledger-Dry-Run
+
+Optionale Zugangsdaten werden nur als `APP_KRAKEN_API_KEY` und
+`APP_KRAKEN_API_SECRET` an das Backend übergeben. Niemals `.env` ausgeben oder
+in Fixtures kopieren. Automatisierte Tests verwenden synthetische Schlüssel
+und kontrollierte Antworten beziehungsweise einen lokalen Mockserver; echte
+Kraken-Aufrufe sind ausgeschlossen. Der manuelle Diagnoseaufruf erfolgt mit
+`scripts/kraken-ledger-preview.sh` und ist in
+`docs/kraken-live-api.md` beschrieben.
+
 ## Architektur und Schichten
 
 Die Abhängigkeiten zeigen nach innen:
@@ -264,6 +274,19 @@ bash -n resume
 
 Weitere Leitlinien:
 
+Sprint 3B stellt dauerhafte, cachebewusste Prüfwerkzeuge bereit:
+
+```bash
+scripts/preflight.sh
+scripts/postgres-schema-check.sh
+scripts/validate-sprint-3b.sh
+```
+
+Der Preflight sammelt alle Qualitätsresultate. Der PostgreSQL-Check verwendet
+einen isolierten PostgreSQL-16-Container und prüft Upgrade, `alembic check`,
+Downgrade auf 0005 und erneutes Upgrade. Der vollständige Validator startet
+erst nach grünem Preflight und räumt sein Compose-Projekt per Trap auf.
+
 - [Coding Rules](../CODING_RULES.md)
 - [Contributing](../CONTRIBUTING.md)
 - [Sprint 2C](../SPRINT.md)
@@ -271,3 +294,12 @@ Weitere Leitlinien:
 - [Architektur](architecture.md)
 - [Import Engine](import.md)
 - [Architecture Decision Records](adr/)
+
+## Kraken-Ledger-Abgleich
+
+`scripts/kraken-ledger-preview.sh` prüft die reduzierte Live-Diagnose;
+`scripts/kraken-ledger-compare.sh` vergleicht eine lokale Ledger-CSV mit einem
+erneuten Live-Abruf. Beide Skripte sprechen ausschließlich die lokale Backend-
+API und lesen keine Secrets. Migration 0007 ist im SQLite- und
+PostgreSQL-Zyklus zu prüfen. Automatisierte Tests verwenden ausschließlich
+synthetische Antworten oder einen lokalen Mockserver.

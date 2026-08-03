@@ -20,12 +20,16 @@ from app.adapters.kraken.transformation import (
 from app.config.settings import get_settings
 from app.core.entities import AuditActorType, AuditEvent
 from app.core.identifiers import Uuid4IdGenerator
+from app.core.tax import TaxReviewCase
 from app.core.time import utc_now
 from app.core.transformation import (
     AcquisitionLot,
+    AcquisitionType,
+    DecisionType,
     DisposalEvent,
     FeeEvent,
     TradeExecution,
+    TransformationDecision,
     TransformationRun,
     TransformationRunSession,
     TransformationStatus,
@@ -35,14 +39,19 @@ from app.core.transformation import (
 from app.core.valuation import (
     METHOD_VERSION,
     DailyPrice,
+    FeeTaxClassification,
+    FeeTaxReviewStatus,
     PriceMethod,
     PriceProviderError,
     ProviderEvidence,
+    RewardValuationComponents,
+    RewardValuationError,
     ValuationDecision,
     ValuationDecisionStatus,
     ValuationRun,
     ValuationRunStatus,
     calculate_eur_value,
+    calculate_reward_valuation,
     daily_average,
     evidence_hash,
     transition_valuation_run,
@@ -137,6 +146,9 @@ class ImportTransformationSummary(DecimalModel):
     checked: int
     review_cases: int
     requirements: int
+    contract_version: str
+    created_objects: int
+    reused_objects: int
 
 
 class ImportResultResponse(DecimalModel):
@@ -155,14 +167,21 @@ class TransformationResultResponse(DecimalModel):
     checked: int
     review_cases: int
     valuation_requirements: int
+    contract_version: str
+    created_objects: int
+    reused_objects: int
 
 
 class ValuationRunResponse(DecimalModel):
     id: str
     status: str
+    method_version: str
     checked: int
     resolved: int
     reviews: int
+    gross_income_total_eur: str
+    fee_candidate_total_eur: str
+    net_acquisition_total_eur: str
 
 
 class ManualPriceResponse(DecimalModel):
@@ -295,6 +314,13 @@ async def import_kraken(
                 "checked": existing.checked_records,
                 "review_cases": existing.review_cases,
                 "requirements": requirements,
+                "contract_version": existing.contract_version,
+                "created_objects": existing.created_objects,
+                "reused_objects": sum(
+                    decision.transformation_run_id == existing.id
+                    and decision.decision_type is DecisionType.DOMAIN_EVENT_REUSED
+                    for decision in list_entities(db, TransformationDecision)
+                ),
             }
         else:
             transformed = KrakenTransformationService(
@@ -308,6 +334,13 @@ async def import_kraken(
                 "checked": transformed.checked_records,
                 "review_cases": transformed.review_cases,
                 "requirements": transformed.valuation_requirements,
+                "contract_version": TRANSFORMATION_CONTRACT_VERSION,
+                "created_objects": transformed.acquisitions
+                + transformed.disposals
+                + transformed.trade_executions
+                + transformed.fee_events
+                + transformed.valuation_requirements,
+                "reused_objects": transformed.reused_objects,
             }
     return response
 
@@ -323,6 +356,13 @@ def transform(session_ids: list[UUID], db: Db) -> dict[str, Any]:
         "checked": result.checked_records,
         "review_cases": result.review_cases,
         "valuation_requirements": result.valuation_requirements,
+        "contract_version": TRANSFORMATION_CONTRACT_VERSION,
+        "created_objects": result.acquisitions
+        + result.disposals
+        + result.trade_executions
+        + result.fee_events
+        + result.valuation_requirements,
+        "reused_objects": result.reused_objects,
     }
 
 
@@ -927,6 +967,9 @@ def valuations(
     refresh_prices: bool = False,
 ) -> dict[str, Any]:
     settings, now = get_settings(), utc_now()
+    gross_income_total = Decimal("0")
+    fee_candidate_total = Decimal("0")
+    net_acquisition_total = Decimal("0")
     run = ValuationRun(
         provider="coingecko",
         correlation_id=uuid4(),
@@ -953,6 +996,19 @@ def valuations(
     audit("valuation.run_created", {"method_version": run.method_version})
     transition_valuation_run(run, ValuationRunStatus.FETCHING, now)
     all_decisions = list_entities(db, ValuationDecision)
+    existing_review_audits = [
+        event
+        for event in list_entities(db, AuditEvent)
+        if event.event_type == "valuation.review_created"
+        and "decision_id" not in event.metadata
+    ]
+    reviewed_requirement_versions = {
+        (
+            str(event.metadata.get("requirement_id", "")),
+            str(event.metadata.get("method_version", "")),
+        )
+        for event in existing_review_audits
+    }
     decisions_by_requirement: dict[UUID, list[ValuationDecision]] = {}
     for existing_decision in all_decisions:
         decisions_by_requirement.setdefault(
@@ -961,7 +1017,10 @@ def valuations(
     pending: list[ValuationRequirement] = []
     for requirement in list_entities(db, ValuationRequirement):
         prior = decisions_by_requirement.get(requirement.id, [])
-        if any(item.method_version == method_version for item in prior):
+        if (
+            any(item.method_version == method_version for item in prior)
+            or (str(requirement.id), method_version) in reviewed_requirement_versions
+        ):
             audit(
                 "valuation.duplicate_detected",
                 {
@@ -985,8 +1044,70 @@ def valuations(
         item = db.get(model, requirement.domain_object_id) if model else None
         if item is None:
             run.review_count += 1
+            audit(
+                "valuation.review_created",
+                {
+                    "requirement_id": str(requirement.id),
+                    "reason_code": "valuation_requirement_domain_object_missing",
+                },
+            )
             continue
         quantity = item.quantity
+        reward_lot = (
+            item
+            if isinstance(item, AcquisitionLot)
+            and item.acquisition_type
+            in {
+                AcquisitionType.STAKING_REWARD,
+                AcquisitionType.LEGACY_STAKING_REWARD,
+            }
+            else None
+        )
+        if reward_lot is not None:
+            try:
+                calculate_reward_valuation(
+                    net_quantity=quantity,
+                    gross_quantity=reward_lot.gross_quantity,
+                    fee_quantity=reward_lot.fee_quantity,
+                    asset_code=reward_lot.asset_code,
+                    fee_asset=reward_lot.fee_asset,
+                    unit_price_eur=Decimal("1"),
+                    method_version=method_version,
+                )
+            except RewardValuationError as error:
+                run.review_count += 1
+                audit(
+                    "valuation.review_created",
+                    {
+                        "requirement_id": str(requirement.id),
+                        "valuation_run_id": str(run.id),
+                        "domain_object_type": requirement.domain_object_type,
+                        "domain_object_id": str(requirement.domain_object_id),
+                        "asset_code": requirement.asset_code,
+                        "valuation_at": requirement.valuation_at.isoformat(),
+                        "price_date": requirement.valuation_at.date().isoformat(),
+                        "method": PriceMethod.DAILY_AVERAGE_HOURLY.value,
+                        "quantity": str(quantity),
+                        "net_quantity": str(quantity),
+                        "gross_quantity": (
+                            str(reward_lot.gross_quantity)
+                            if reward_lot.gross_quantity is not None
+                            else None
+                        ),
+                        "fee_quantity": (
+                            str(reward_lot.fee_quantity)
+                            if reward_lot.fee_quantity is not None
+                            else None
+                        ),
+                        "method_version": method_version,
+                        "status": ValuationDecisionStatus.REVIEW_REQUIRED.value,
+                        "reason_code": error.code,
+                        "valuation_basis": "staking_reward_components_v2",
+                        "rounding_rule": "ROUND_HALF_UP_DISPLAY_ONLY",
+                        "version": 1,
+                    },
+                )
+                continue
         try:
             if requirement.method == ValuationMethod.DIRECT_EUR:
                 value = (
@@ -1196,6 +1317,18 @@ def valuations(
                 decision_status = daily.status
                 value = calculate_eur_value(quantity, unit)
                 decision_provider_evidence_id = daily.provider_evidence_id
+            reward_components: RewardValuationComponents | None = None
+            if reward_lot is not None:
+                reward_components = calculate_reward_valuation(
+                    net_quantity=quantity,
+                    gross_quantity=reward_lot.gross_quantity,
+                    fee_quantity=reward_lot.fee_quantity,
+                    asset_code=reward_lot.asset_code,
+                    fee_asset=reward_lot.fee_asset,
+                    unit_price_eur=unit,
+                    method_version=method_version,
+                )
+                value = reward_components.net_acquisition_value_eur
             previous = decisions_by_requirement.get(requirement.id, [])
             previous.sort(key=lambda item: item.version, reverse=True)
             decision = ValuationDecision(
@@ -1231,6 +1364,37 @@ def valuations(
                 ),
                 version=(previous[0].version + 1 if previous else 1),
                 supersedes_id=(previous[0].id if previous else None),
+                gross_quantity=(
+                    reward_components.gross_quantity if reward_components else None
+                ),
+                fee_quantity=(
+                    reward_components.fee_quantity if reward_components else None
+                ),
+                net_quantity=quantity,
+                gross_income_eur=(
+                    reward_components.gross_income_eur if reward_components else None
+                ),
+                fee_value_eur=(
+                    reward_components.fee_value_eur if reward_components else None
+                ),
+                net_acquisition_value_eur=(
+                    value if isinstance(item, AcquisitionLot) else None
+                ),
+                valuation_basis=(
+                    reward_components.valuation_basis
+                    if reward_components
+                    else "net_quantity"
+                ),
+                fee_tax_classification=(
+                    reward_components.fee_tax_classification
+                    if reward_components
+                    else FeeTaxClassification.NOT_APPLICABLE
+                ),
+                fee_tax_review_status=(
+                    reward_components.fee_tax_review_status
+                    if reward_components
+                    else FeeTaxReviewStatus.NOT_REQUIRED
+                ),
             )
             db.add(decision)
             if previous:
@@ -1244,6 +1408,16 @@ def valuations(
                 )
             if decision.status == ValuationDecisionStatus.RESOLVED:
                 run.resolved_requirements += 1
+                if decision.gross_income_eur is not None:
+                    gross_income_total += decision.gross_income_eur
+                if (
+                    decision.fee_value_eur is not None
+                    and decision.fee_tax_classification
+                    is FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+                ):
+                    fee_candidate_total += decision.fee_value_eur
+                if decision.net_acquisition_value_eur is not None:
+                    net_acquisition_total += decision.net_acquisition_value_eur
                 if method == PriceMethod.NATIVE_EUR:
                     run.native_count += 1
                 elif method == PriceMethod.MANUAL_DAILY_PRICE:
@@ -1294,9 +1468,13 @@ def valuations(
     return {
         "id": str(run.id),
         "status": run.status.value,
+        "method_version": run.method_version,
         "checked": run.checked_requirements,
         "resolved": run.resolved_requirements,
         "reviews": run.review_count,
+        "gross_income_total_eur": str(gross_income_total),
+        "fee_candidate_total_eur": str(fee_candidate_total),
+        "net_acquisition_total_eur": str(net_acquisition_total),
     }
 
 
@@ -1329,6 +1507,38 @@ def valuation_list(
             "method": x.method.value,
             "unit_price_eur": str(x.unit_price_eur),
             "eur_value": str(x.eur_value),
+            "quantity": str(x.quantity),
+            "net_quantity": str(x.net_quantity) if x.net_quantity is not None else None,
+            "gross_quantity": (
+                str(x.gross_quantity) if x.gross_quantity is not None else None
+            ),
+            "fee_quantity": (
+                str(x.fee_quantity) if x.fee_quantity is not None else None
+            ),
+            "gross_income_eur": (
+                str(x.gross_income_eur) if x.gross_income_eur is not None else None
+            ),
+            "fee_value_eur": (
+                str(x.fee_value_eur) if x.fee_value_eur is not None else None
+            ),
+            "net_acquisition_value_eur": (
+                str(x.net_acquisition_value_eur)
+                if x.net_acquisition_value_eur is not None
+                else None
+            ),
+            "valuation_basis": x.valuation_basis,
+            "fee_tax_classification": (
+                x.fee_tax_classification.value
+                if x.fee_tax_classification is not None
+                else None
+            ),
+            "fee_tax_review_status": (
+                x.fee_tax_review_status.value
+                if x.fee_tax_review_status is not None
+                else None
+            ),
+            "method_version": x.method_version,
+            "rounding_rule": x.rounding_rule,
             "source": x.price_source,
             "provider": x.provider,
             "samples": x.sample_count,
@@ -1348,6 +1558,51 @@ def valuation_list(
         and (date_from is None or x.price_date >= date_from)
         and (date_to is None or x.price_date <= date_to)
     ]
+    rows += [
+        {
+            "id": str(audit.id),
+            "asset": str(audit.metadata["asset_code"]),
+            "date": date.fromisoformat(str(audit.metadata["price_date"])),
+            "method": str(audit.metadata["method"]),
+            "unit_price_eur": None,
+            "eur_value": None,
+            "quantity": str(audit.metadata["quantity"]),
+            "net_quantity": str(audit.metadata["net_quantity"]),
+            "gross_quantity": audit.metadata["gross_quantity"],
+            "fee_quantity": audit.metadata["fee_quantity"],
+            "gross_income_eur": None,
+            "fee_value_eur": None,
+            "net_acquisition_value_eur": None,
+            "valuation_basis": str(audit.metadata["valuation_basis"]),
+            "fee_tax_classification": None,
+            "fee_tax_review_status": FeeTaxReviewStatus.REVIEW_REQUIRED.value,
+            "method_version": str(audit.metadata["method_version"]),
+            "rounding_rule": str(audit.metadata["rounding_rule"]),
+            "source": None,
+            "provider": None,
+            "samples": 0,
+            "status": ValuationDecisionStatus.REVIEW_REQUIRED.value,
+            "effective_status": ValuationDecisionStatus.REVIEW_REQUIRED.value,
+            "version": int(audit.metadata["version"]),
+            "fetched_at": None,
+            "reason_code": str(audit.metadata["reason_code"]),
+        }
+        for audit in list_entities(db, AuditEvent)
+        if audit.event_type == "valuation.review_created"
+        and "decision_id" not in audit.metadata
+        and "valuation_basis" in audit.metadata
+        and (asset is None or audit.metadata["asset_code"] == asset.upper())
+        and (status is None or status == ValuationDecisionStatus.REVIEW_REQUIRED)
+        and (method is None or audit.metadata["method"] == method.value)
+        and (
+            date_from is None
+            or date.fromisoformat(str(audit.metadata["price_date"])) >= date_from
+        )
+        and (
+            date_to is None
+            or date.fromisoformat(str(audit.metadata["price_date"])) <= date_to
+        )
+    ]
     return page(rows, offset, limit)
 
 
@@ -1358,7 +1613,64 @@ def valuation_detail(item_id: UUID, db: Db) -> dict[str, Any]:
 
     item = db.get(ValuationDecision, item_id)
     if item is None:
-        raise not_found("valuation_not_found")
+        review = db.get(AuditEvent, item_id)
+        if (
+            review is None
+            or review.event_type != "valuation.review_created"
+            or "valuation_basis" not in review.metadata
+        ):
+            raise not_found("valuation_not_found")
+        return {
+            "id": str(review.id),
+            "asset": str(review.metadata["asset_code"]),
+            "quantity": str(review.metadata["quantity"]),
+            "net_quantity": str(review.metadata["net_quantity"]),
+            "gross_quantity": review.metadata["gross_quantity"],
+            "fee_quantity": review.metadata["fee_quantity"],
+            "unit_price_eur": None,
+            "eur_value": None,
+            "gross_income_eur": None,
+            "fee_value_eur": None,
+            "net_acquisition_value_eur": None,
+            "valuation_basis": str(review.metadata["valuation_basis"]),
+            "fee_tax_classification": None,
+            "fee_tax_review_status": FeeTaxReviewStatus.REVIEW_REQUIRED.value,
+            "method_version": str(review.metadata["method_version"]),
+            "rounding_rule": str(review.metadata["rounding_rule"]),
+            "method": str(review.metadata["method"]),
+            "status": ValuationDecisionStatus.REVIEW_REQUIRED.value,
+            "effective_status": ValuationDecisionStatus.REVIEW_REQUIRED.value,
+            "version": int(review.metadata["version"]),
+            "supersedes_id": None,
+            "superseded_by_id": None,
+            "reason_code": str(review.metadata["reason_code"]),
+            "requirement": {
+                "id": str(review.metadata["requirement_id"]),
+                "transformation_run_id": None,
+            },
+            "provider_evidence_id": None,
+            "valuation_run": {
+                "id": str(review.metadata["valuation_run_id"]),
+                "status": ValuationRunStatus.COMPLETED_WITH_REVIEW.value,
+                "method_version": str(review.metadata["method_version"]),
+            },
+            "domain_object": {
+                "type": str(review.metadata["domain_object_type"]),
+                "id": str(review.metadata["domain_object_id"]),
+            },
+            "daily_price": None,
+            "provider_evidence": None,
+            "import_sessions": [],
+            "transformation_runs": [],
+            "raw_records": [],
+            "audit": [
+                {
+                    "event_type": review.event_type,
+                    "occurred_at": review.occurred_at,
+                    "metadata": review.metadata,
+                }
+            ],
+        }
     requirement = db.get(ValuationRequirement, item.valuation_requirement_id)
     valuation_run = db.get(ValuationRun, item.valuation_run_id)
     daily_price = (
@@ -1409,8 +1721,41 @@ def valuation_detail(item_id: UUID, db: Db) -> dict[str, Any]:
         "id": str(item.id),
         "asset": item.asset_code,
         "quantity": str(item.quantity),
+        "net_quantity": (
+            str(item.net_quantity) if item.net_quantity is not None else None
+        ),
+        "gross_quantity": (
+            str(item.gross_quantity) if item.gross_quantity is not None else None
+        ),
+        "fee_quantity": (
+            str(item.fee_quantity) if item.fee_quantity is not None else None
+        ),
         "unit_price_eur": str(item.unit_price_eur),
         "eur_value": str(item.eur_value),
+        "gross_income_eur": (
+            str(item.gross_income_eur) if item.gross_income_eur is not None else None
+        ),
+        "fee_value_eur": (
+            str(item.fee_value_eur) if item.fee_value_eur is not None else None
+        ),
+        "net_acquisition_value_eur": (
+            str(item.net_acquisition_value_eur)
+            if item.net_acquisition_value_eur is not None
+            else None
+        ),
+        "valuation_basis": item.valuation_basis,
+        "fee_tax_classification": (
+            item.fee_tax_classification.value
+            if item.fee_tax_classification is not None
+            else None
+        ),
+        "fee_tax_review_status": (
+            item.fee_tax_review_status.value
+            if item.fee_tax_review_status is not None
+            else None
+        ),
+        "method_version": item.method_version,
+        "rounding_rule": item.rounding_rule,
         "method": item.method.value,
         "status": item.status.value,
         "effective_status": (
@@ -1557,6 +1902,29 @@ def reviews(db: Db, offset: Offset = 0, limit: Limit = 100) -> dict[str, Any]:
         for x in list_entities(db, AuditEvent)
         if x.event_type == "valuation.provider_fetch_failed"
     ]
+    rows += [
+        {
+            "id": str(x.id),
+            "code": str(x.metadata["reason_code"]),
+            "message": "Bewertung erfordert fachliche Prüfung.",
+            "kind": "valuation",
+            "occurred_at": x.occurred_at,
+        }
+        for x in list_entities(db, AuditEvent)
+        if x.event_type == "valuation.review_created"
+        and "reason_code" in x.metadata
+        and "decision_id" not in x.metadata
+    ]
+    rows += [
+        {
+            "id": str(x.id),
+            "code": x.code,
+            "message": x.message,
+            "kind": "tax",
+            "occurred_at": x.occurred_at,
+        }
+        for x in list_entities(db, TaxReviewCase)
+    ]
     rows.sort(key=lambda row: str(row["occurred_at"]), reverse=True)
     return page(rows, offset, limit)
 
@@ -1569,6 +1937,7 @@ def review_detail(item_id: UUID, db: Db) -> dict[str, Any]:
     issue = db.get(TransformationIssue, item_id)
     decision = db.get(ValuationDecision, item_id)
     audit = db.get(AuditEvent, item_id)
+    tax_review = db.get(TaxReviewCase, item_id)
     if issue:
         return {
             "id": str(issue.id),
@@ -1583,11 +1952,22 @@ def review_detail(item_id: UUID, db: Db) -> dict[str, Any]:
             "message": "Bewertung erfordert fachliche Prüfung.",
             "kind": "valuation",
         }
-    if audit and audit.event_type == "valuation.provider_fetch_failed":
+    if audit and audit.event_type in {
+        "valuation.provider_fetch_failed",
+        "valuation.review_created",
+    }:
+        code = audit.metadata.get(
+            "code",
+            audit.metadata.get("reason_code", "valuation_provider_unavailable"),
+        )
         return {
             "id": str(audit.id),
-            "code": str(audit.metadata.get("code", "valuation_provider_unavailable")),
-            "message": "Der Kursprovider konnte die Bewertung nicht abschließen.",
+            "code": str(code),
+            "message": (
+                "Bewertung erfordert fachliche Prüfung."
+                if audit.event_type == "valuation.review_created"
+                else "Der Kursprovider konnte die Bewertung nicht abschließen."
+            ),
             "kind": "valuation",
             "audit": [
                 {
@@ -1595,6 +1975,25 @@ def review_detail(item_id: UUID, db: Db) -> dict[str, Any]:
                     "occurred_at": audit.occurred_at,
                     "metadata": audit.metadata,
                 }
+            ],
+        }
+    if tax_review:
+        return {
+            "id": str(tax_review.id),
+            "code": tax_review.code,
+            "message": tax_review.message,
+            "kind": "tax",
+            "source_object_type": tax_review.source_object_type,
+            "source_object_id": str(tax_review.source_object_id),
+            "tax_calculation_run_id": str(tax_review.tax_calculation_run_id),
+            "audit": [
+                {
+                    "event_type": event.event_type,
+                    "occurred_at": event.occurred_at,
+                    "metadata": event.metadata,
+                }
+                for event in list_entities(db, AuditEvent)
+                if event.entity_id == tax_review.tax_calculation_run_id
             ],
         }
     raise not_found("review_not_found")
@@ -1607,7 +2006,7 @@ def system_status(db: Db) -> dict[str, Any]:
     return {
         "backend": True,
         "database": db.scalar(text("SELECT 1")) == 1,
-        "migration": "0005_eur_valuation",
+        "migration": "0008_reward_valuation_components",
         "coingecko_mode": settings.coingecko_api_mode,
         "api_key_configured": bool(settings.coingecko_api_key),
         "method_version": METHOD_VERSION,

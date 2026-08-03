@@ -1,9 +1,12 @@
+import re
 from dataclasses import dataclass
+from enum import StrEnum
 
 from app.core.transformation import AssetIdentity, MappingStatus
 
-ASSET_MAPPING_VERSION = "kraken-assets-v1"
-ASSET_ALIASES = {
+ASSET_MAPPING_VERSION = "kraken-assets-v2"
+LEGACY_ASSET_MAPPING_VERSION = "kraken-assets-v1"
+LEGACY_ASSET_ALIASES = {
     "BTC": "BTC",
     "XBT": "BTC",
     "XXBT": "BTC",
@@ -14,15 +17,97 @@ ASSET_ALIASES = {
     "USD": "USD",
     "ZUSD": "USD",
 }
-FIAT_ASSETS = frozenset({"EUR", "USD"})
+ASSET_ALIASES = {
+    **LEGACY_ASSET_ALIASES,
+    "ZGBP": "GBP",
+    "ZCAD": "CAD",
+    "ZJPY": "JPY",
+}
+FIAT_ASSETS = frozenset({"EUR", "USD", "GBP", "CAD", "JPY"})
+_ASSET_BASE = re.compile(r"^[A-Z0-9]{1,32}$")
+_PRODUCT_ASSET = re.compile(r"^(?P<body>[A-Z0-9]{1,40})\.(?P<variant>[SBFM])$")
+_PRODUCT_MARKER = re.compile(r"^(?P<base>[A-Z][A-Z0-9]*?)(?P<marker>\d{1,8})$")
+
+
+class KrakenAssetNormalizationKind(StrEnum):
+    ALIAS = "alias"
+    IDENTITY = "identity"
+    PRODUCT_VARIANT = "product_variant"
+    INVALID = "invalid"
+
+
+@dataclass(frozen=True, kw_only=True)
+class KrakenAssetIdentity:
+    raw_asset: str
+    normalized_asset: str | None
+    alias_kind: KrakenAssetNormalizationKind
+    product_marker: str | None
+    product_variant: str | None
+    mapping_version: str
+    is_unambiguous: bool
+
+
+def normalize_kraken_asset(raw_asset: str) -> KrakenAssetIdentity:
+    value = raw_asset
+    product_marker: str | None = None
+    product_variant: str | None = None
+    product = _PRODUCT_ASSET.fullmatch(value)
+    if product is not None:
+        value = product.group("body")
+        product_variant = product.group("variant")
+        marker = _PRODUCT_MARKER.fullmatch(value)
+        if marker is not None:
+            value = marker.group("base")
+            product_marker = marker.group("marker")
+    if _ASSET_BASE.fullmatch(value) is None:
+        return KrakenAssetIdentity(
+            raw_asset=raw_asset,
+            normalized_asset=None,
+            alias_kind=KrakenAssetNormalizationKind.INVALID,
+            product_marker=product_marker,
+            product_variant=product_variant,
+            mapping_version=ASSET_MAPPING_VERSION,
+            is_unambiguous=False,
+        )
+    normalized = ASSET_ALIASES.get(value, value)
+    if product_variant is not None:
+        kind = KrakenAssetNormalizationKind.PRODUCT_VARIANT
+    elif normalized != value:
+        kind = KrakenAssetNormalizationKind.ALIAS
+    else:
+        kind = KrakenAssetNormalizationKind.IDENTITY
+    return KrakenAssetIdentity(
+        raw_asset=raw_asset,
+        normalized_asset=normalized,
+        alias_kind=kind,
+        product_marker=product_marker,
+        product_variant=product_variant,
+        mapping_version=ASSET_MAPPING_VERSION,
+        is_unambiguous=True,
+    )
 
 
 def resolve_asset(raw_code: str) -> AssetIdentity:
-    canonical = ASSET_ALIASES.get(raw_code)
+    normalized = normalize_kraken_asset(raw_code)
+    return AssetIdentity(
+        raw_code=normalized.raw_asset,
+        canonical_code=normalized.normalized_asset,
+        mapping_version=normalized.mapping_version,
+        mapping_status=(
+            MappingStatus.MAPPED
+            if normalized.is_unambiguous
+            else MappingStatus.UNRESOLVED
+        ),
+        review_reason=None if normalized.is_unambiguous else "asset_alias_unknown",
+    )
+
+
+def resolve_asset_legacy_v1(raw_code: str) -> AssetIdentity:
+    canonical = LEGACY_ASSET_ALIASES.get(raw_code)
     return AssetIdentity(
         raw_code=raw_code,
         canonical_code=canonical,
-        mapping_version=ASSET_MAPPING_VERSION,
+        mapping_version=LEGACY_ASSET_MAPPING_VERSION,
         mapping_status=(
             MappingStatus.MAPPED if canonical is not None else MappingStatus.UNRESOLVED
         ),

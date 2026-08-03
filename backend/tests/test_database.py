@@ -29,7 +29,7 @@ class ComparisonContext:
 
 def test_metadata_contains_domain_tables() -> None:
     models.configure_mappings()
-    assert len(Base.metadata.tables) == 22
+    assert len(Base.metadata.tables) == 30
 
 
 def test_session_dependency_provides_session() -> None:

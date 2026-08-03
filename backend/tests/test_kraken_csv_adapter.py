@@ -174,7 +174,7 @@ def test_ledger_preserves_types_subtypes_and_unknown_fields(
 ) -> None:
     header = LEDGER_HEADER + ",subtype,aclass,balance,future"
     text = (
-        f'{header}\n{ledger_row(kind=kind, amount="-1.2300")},'
+        f"{header}\n{ledger_row(kind=kind, amount='-1.2300')},"
         f'{subtype},currency,9.5,"a,b"\n'
     )
     batch, errors = parse(text)
@@ -207,6 +207,22 @@ def test_ledger_optional_columns_may_be_absent_and_multiline_values_survive() ->
     assert row.balance is None
     assert row.extra_fields["note"] == "line one\nline two"
     assert row.source_line == 3
+
+
+def test_current_ledger_schema_builds_source_independent_identity() -> None:
+    header = (
+        "txid,refid,time,type,subtype,aclass,subclass,asset,wallet,amount,fee,balance"
+    )
+    row = (
+        "L-CANONICAL,R1,2026-01-02 03:04:05,earn,reward,currency,,XXBT,spot,1.25,0.01,4"
+    )
+    batch, errors = parse(f"{header}\n{row}\n")
+    assert errors == ()
+    assert batch is not None
+    raw = batch.raw_records()[0]
+    assert raw.canonical_key == "kraken:spot_ledger:L-CANONICAL"
+    assert raw.technical_metadata is not None
+    assert len(raw.technical_metadata["canonical_fingerprint"]) == 64
 
 
 @pytest.mark.parametrize("field", ["amount", "fee", "balance"])

@@ -14,7 +14,17 @@ transformation, tax calculation, FIFO allocation, pricing, or recommendation.
 The compatibility entry point accepts one UTF-8 JSON object as `str` or
 `bytes`. The primary batch contract accepts an ordered sequence of generic JSON
 records. The Kraken CSV adapter translates Ledger History and Trades History
-files into this contract. No network or API integration exists.
+files into this contract.
+
+## Live-Ledger: Vorschau vor bestätigtem Import
+
+Die serverseitige Kraken-Ledger-Vorschau lädt alle Offset-Seiten eines
+Zeitraums, prüft Pflichtfelder und Duplikate und erzeugt einen Ledger-ID-Digest,
+legt aber keine ImportSession oder RawImportRecords an. Nach dokumentiertem
+Vergleich mit einem CSV-Export desselben Zeitraums kann der Benutzer den Digest
+ausdrücklich bestätigen. Der Import ruft Kraken erneut ab und persistiert nur
+bei unverändertem Digest. CSV und API verwenden dieselbe Ledger-ID als
+gemeinsame Idempotenzidentität.
 
 ## Kraken CSV Adapter
 
@@ -230,3 +240,42 @@ erfolgreicher Lauf dieses Schlüssels wird unverändert wiederverwendet; seine
 Run-ID und Zusammenfassung werden rekonstruiert. Fehlgeschlagene Läufe gelten
 nicht als wiederverwendbarer Erfolg, und eine neue Vertragsversion darf einen
 neuen Lauf erzeugen.
+
+Sprint 3B verändert diesen Importvertrag nicht. FIFO und Journal arbeiten nur
+auf transformierten und bewerteten Domainobjekten. Duplikatimporte erzeugen
+keine zusätzlichen Lose; der Steuer-Snapshot referenziert die stabilen Domain-
+und Bewertungsidentitäten.
+
+## Kraken Live API und quellenübergreifende Identität
+
+Der Live-Ledger-Import verwendet dieselbe Importengine wie CSV. Das kanonische
+Merkmal `kraken:spot_ledger:<ledger-id>` ist unabhängig vom Transport und in
+Migration 0007 eindeutig. Identischer Inhalt wird wiederverwendet;
+widersprüchlicher Inhalt wird atomar als `canonical_record_conflict`
+abgebrochen. Primärdaten werden nicht überschrieben. Der interne Zeitraum ist
+UTC und halboffen (`[start, end)`); Kraken-Grenzen dienen nur zum Abruf einer
+Obermenge, die anschließend lokal gefiltert wird. Details stehen in
+[Kraken Live API](kraken-live-api.md).
+
+Die kanonische Assetnormalisierung rät keine Coin-Identität: bekannte Kraken-
+Aliase werden explizit abgebildet, während ein syntaktisch gültiger neuer Code
+per Identität erhalten bleibt. Kontrollierte Suffixe `.S`, `.B`, `.F` und `.M`
+sowie ein unmittelbar davor stehender numerischer Produktmarker werden separat
+gespeichert. Der vollständige Rohcode und das CSV-Walletfeld bleiben
+Quelleninformation; aus einem Suffix wird keine Walletklassifikation
+abgeleitet. Nur ungültige oder mehrdeutige Codes erscheinen in
+`unknown_asset_mappings` und sperren die Importfreigabe.
+
+CSV/API-Abgleich und Domaintransformation beziehen diese Identität aus
+`normalize_kraken_asset`. Neue RawImportRecords tragen Rohcode, Basisasset,
+Produktmarker, Produktsuffix und Mappingversion als technische kanonische
+Metadaten. Für ältere Rohdatensätze berechnet die Transformation denselben
+Vertrag erneut; sie verwendet keine separate Whitelist.
+
+Die aktive Direkttransformation nutzt `kraken-domain-v2`. Ein erneuter Lauf
+mit v2 prüft alle Datensätze, übernimmt aber bereits unter v1 erzeugte,
+inhaltlich identische Domainobjekte über ihren stabilen fachlichen Schlüssel.
+Seine Decisions weisen Wiederverwendung und Neuanlage getrennt aus. Eine
+widersprüchliche Projektion wird nicht überschrieben, sondern bleibt ein
+strukturierter Reviewkonflikt. Historische v1-Läufe und deren
+`asset_alias_unknown`-Entscheidungen werden nicht umgeschrieben.

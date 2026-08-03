@@ -19,6 +19,7 @@ class TransformationStatus(StrEnum):
 
 class DecisionType(StrEnum):
     DOMAIN_EVENT_CREATED = "domain_event_created"
+    DOMAIN_EVENT_REUSED = "domain_event_reused"
     INTERNAL_MOVEMENT = "internal_movement"
     REVIEW_REQUIRED = "review_required"
     UNSUPPORTED = "unsupported"

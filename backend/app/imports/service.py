@@ -44,6 +44,7 @@ class RawRecordInput:
     payload: JsonObject
     external_id: str | None = None
     technical_metadata: dict[str, Any] | None = None
+    canonical_key: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -56,6 +57,8 @@ class ImportResult:
     accepted_count: int = 0
     rejected_count: int = 0
     errors: tuple[ValidationIssue, ...] = ()
+    reused_count: int = 0
+    reused_session_ids: tuple[UUID, ...] = ()
 
     @property
     def import_hash(self) -> str | None:
@@ -154,6 +157,17 @@ class ImportService:
                 previous.status is ImportStatus.COMPLETED
                 or (previous.status is ImportStatus.FAILED and not retry_failed)
             ):
+                reused_session_ids = {
+                    existing.import_session_id
+                    for record in records
+                    if record.canonical_key is not None
+                    and (
+                        existing := unit_of_work.raw_imports.find_by_canonical_key(
+                            record.canonical_key
+                        )
+                    )
+                    is not None
+                }
                 session.skipped_count = len(records)
                 transition(session, ImportStatus.COMPLETED, self._clock())
                 self._audit(
@@ -171,9 +185,58 @@ class ImportService:
                     outcome=ImportOutcome.DUPLICATE,
                     accepted_count=0,
                     rejected_count=0,
+                    reused_count=len(records),
+                    reused_session_ids=tuple(
+                        sorted(reused_session_ids or {previous.id}, key=str)
+                    ),
                 )
             transition(session, ImportStatus.PERSISTING, self._clock())
-            for position, item in enumerate(records):
+            pending: list[RawRecordInput] = []
+            reused = 0
+            reused_sessions: set[UUID] = set()
+            seen_keys: dict[str, str] = {}
+            for item in records:
+                item_hash = canonical_sha256(item.payload)
+                if item.canonical_key is not None:
+                    batch_hash = seen_keys.get(item.canonical_key)
+                    fingerprint = str(
+                        (item.technical_metadata or {}).get(
+                            "canonical_fingerprint", item_hash
+                        )
+                    )
+                    if batch_hash is not None:
+                        if batch_hash != fingerprint:
+                            raise ImportEngineError(
+                                code="canonical_record_conflict",
+                                description=(
+                                    "A canonical record ID has conflicting content."
+                                ),
+                            )
+                        reused += 1
+                        continue
+                    seen_keys[item.canonical_key] = fingerprint
+                    existing = unit_of_work.raw_imports.find_by_canonical_key(
+                        item.canonical_key
+                    )
+                    if existing is not None:
+                        existing_fingerprint = str(
+                            existing.technical_metadata.get(
+                                "canonical_fingerprint", existing.content_hash
+                            )
+                        )
+                        if existing_fingerprint != fingerprint:
+                            raise ImportEngineError(
+                                code="canonical_record_conflict",
+                                description=(
+                                    "A canonical record ID already exists with "
+                                    "different content."
+                                ),
+                            )
+                        reused += 1
+                        reused_sessions.add(existing.import_session_id)
+                        continue
+                pending.append(item)
+            for position, item in enumerate(pending):
                 unit_of_work.raw_imports.add(
                     RawImportRecord(
                         import_session_id=session.id,
@@ -183,25 +246,35 @@ class ImportService:
                         sequence_number=position,
                         external_id=item.external_id,
                         technical_metadata=item.technical_metadata or {},
+                        canonical_key=item.canonical_key,
                     )
                 )
             unit_of_work.flush()
-            session.persisted_count = len(records)
+            session.persisted_count = len(pending)
+            session.skipped_count = reused
             transition(session, ImportStatus.COMPLETED, self._clock())
             self._audit(
                 unit_of_work,
                 context,
                 "import.completed",
-                {"import_hash": import_hash, "record_count": len(records)},
+                {
+                    "import_hash": import_hash,
+                    "record_count": len(pending),
+                    "reused_count": reused,
+                },
             )
             unit_of_work.commit()
             return ImportResult(
                 session_id=session.id,
                 content_hash=import_hash,
                 skipped=False,
-                outcome=ImportOutcome.SUCCESS,
-                accepted_count=len(records),
+                outcome=(
+                    ImportOutcome.DUPLICATE if not pending else ImportOutcome.SUCCESS
+                ),
+                accepted_count=len(pending),
                 rejected_count=0,
+                reused_count=reused,
+                reused_session_ids=tuple(sorted(reused_sessions, key=str)),
             )
 
     def _audit(
@@ -223,6 +296,7 @@ class ImportService:
                     **metadata,
                     "correlation_id": str(context.correlation_id),
                     "source": context.source,
+                    "source_metadata": dict(context.metadata),
                 },
             )
         )
@@ -271,8 +345,7 @@ class ImportService:
             wrapped: ImportEngineError = PersistenceImportError(
                 code="unexpected_import_error",
                 description=(
-                    "The import failed because of an unexpected "
-                    "infrastructure error."
+                    "The import failed because of an unexpected infrastructure error."
                 ),
             )
             wrapped = self._record_failure_safely(session, wrapped, original=error)

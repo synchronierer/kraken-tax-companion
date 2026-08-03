@@ -51,10 +51,37 @@ class KrakenRow:
         external_kind = (
             "ledger" if self.export_kind is KrakenExportKind.LEDGERS else "trade"
         )
+        metadata = dict(self.technical_metadata)
+        if isinstance(self, KrakenLedgerRow) and {
+            "refid",
+            "subclass",
+            "wallet",
+        }.issubset({key.lower() for key in self.original_values}):
+            from app.adapters.kraken.ledger import (
+                LEDGER_ASSET_MAPPING_VERSION,
+                canonical_fingerprint,
+                csv_row_record,
+            )
+
+            canonical = csv_row_record(self)
+            metadata["canonical_fingerprint"] = canonical_fingerprint(canonical)
+            metadata["asset_mapping_version"] = LEDGER_ASSET_MAPPING_VERSION
+            metadata["canonical_asset"] = {
+                "raw_asset": canonical.asset_raw,
+                "normalized_asset": canonical.asset_normalized,
+                "product_marker": canonical.product_marker,
+                "product_variant": canonical.product_variant,
+                "is_unambiguous": canonical.asset_mapping_known,
+            }
         return RawRecordInput(
             payload=dict(self.original_values),
             external_id=f"kraken:{external_kind}:{self.txid}",
-            technical_metadata=dict(self.technical_metadata),
+            technical_metadata=metadata,
+            canonical_key=(
+                f"kraken:spot_ledger:{self.txid}"
+                if self.export_kind is KrakenExportKind.LEDGERS
+                else f"kraken:spot_trades:{self.txid}"
+            ),
         )
 
 

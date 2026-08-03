@@ -12,6 +12,7 @@ from app.database.mappings import (
     disposal_events,
     import_sessions,
     raw_import_records,
+    tax_review_cases,
     trade_executions,
     transformation_issues,
     transformation_runs,
@@ -86,6 +87,7 @@ class SqlAlchemyDashboardQueries:
                 or 0
             )
             + self._count(transformation_issues)
+            + self._count(tax_review_cases)
             + int(
                 self._session.scalar(
                     select(func.count())

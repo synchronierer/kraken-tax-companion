@@ -61,6 +61,8 @@ class RawImportRepository(Repository[RawImportRecord], Protocol):
 
     def list_by_external_id(self, external_id: str) -> Sequence[RawImportRecord]: ...
 
+    def find_by_canonical_key(self, canonical_key: str) -> RawImportRecord | None: ...
+
 
 class AuditRepository(Repository[AuditEvent], Protocol):
     pass

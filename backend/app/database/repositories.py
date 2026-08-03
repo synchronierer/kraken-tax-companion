@@ -56,6 +56,12 @@ class SqlAlchemyRawImportRepository(SqlAlchemyRepository[RawImportRecord]):
         )
         return tuple(self._session.scalars(statement))
 
+    def find_by_canonical_key(self, canonical_key: str) -> RawImportRecord | None:
+        statement = select(RawImportRecord).where(
+            raw_import_records.c.canonical_key == canonical_key
+        )
+        return self._session.scalar(statement)
+
 
 class SqlAlchemyImportSessionRepository(SqlAlchemyRepository[ImportSession]):
     def __init__(self, session: Session) -> None:

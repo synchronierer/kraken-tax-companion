@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 from uuid import uuid4
@@ -51,7 +52,11 @@ from app.core.valuation import (
 from app.database.base import Base
 from app.database.session import get_session
 from app.infrastructure import coingecko
-from app.infrastructure.coingecko import CoinGeckoProvider
+from app.infrastructure.coingecko import (
+    ASSET_IDS,
+    MAPPING_VERSION,
+    CoinGeckoProvider,
+)
 from app.main import app
 
 NOW = datetime(2026, 7, 30, 12, tzinfo=UTC)
@@ -398,6 +403,36 @@ def provider(mode: str = "keyless", key: str | None = None) -> CoinGeckoProvider
     )
 
 
+def test_coingecko_asset_mapping_v2_is_an_explicit_allowlist() -> None:
+    expected = {
+        "ADA": "cardano",
+        "ATOM": "cosmos",
+        "BTC": "bitcoin",
+        "DOT": "polkadot",
+        "EIGEN": "eigenlayer",
+        "ETH": "ethereum",
+        "GRT": "the-graph",
+        "KAVA": "kava",
+        "XTZ": "tezos",
+    }
+
+    assert expected == ASSET_IDS
+    assert MAPPING_VERSION == "coingecko-asset-map-v2"
+    for asset, provider_id in expected.items():
+        assert provider().asset_id(asset) == provider_id
+        assert provider().asset_id(asset.lower()) == provider_id
+
+    assert provider().asset_id("EIGEN") == "eigenlayer"
+    assert provider().asset_id("ATOM") == "cosmos"
+    with pytest.raises(PriceProviderError) as missing:
+        provider().asset_id("UNLISTED")
+    assert missing.value.code == "valuation_asset_mapping_missing"
+    assert MAPPING_VERSION in str(missing.value)
+
+    source = Path(coingecko.__file__).read_text(encoding="utf-8")
+    assert "/coins/list" not in source
+
+
 def test_coingecko_modes_and_normalization(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "api-key" not in provider()._headers()
     assert (
@@ -422,6 +457,7 @@ def test_coingecko_modes_and_normalization(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(PriceProviderError) as missing:
         provider().observations("NOPE", "EUR", NOW, NOW + timedelta(hours=1))
     assert missing.value.code == "valuation_asset_mapping_missing"
+    assert MAPPING_VERSION in str(missing.value)
     assert provider().asset_id("BTC") == "bitcoin"
     with pytest.raises(PriceProviderError):
         provider().asset_id("NOPE")
@@ -620,7 +656,9 @@ def test_empty_api_and_errors(client: TestClient) -> None:
         response = client.get(path)
         assert response.status_code == 200
         assert response.json()["total"] == 0
-    assert client.get("/api/system/status").json()["api_key_configured"] is False
+    system = client.get("/api/system/status").json()
+    assert system["api_key_configured"] is False
+    assert system["asset_mapping_version"] == MAPPING_VERSION
     random = uuid4()
     for path in (
         f"/api/imports/{random}",
@@ -1480,6 +1518,7 @@ def test_existing_provider_evidence_is_reused(
             price = local_client.get("/api/prices").json()["items"][0]
             detail = local_client.get(f"/api/prices/{price['id']}").json()
             assert detail["provider_evidence"]["id"] == str(existing_evidence.id)
+            assert detail["provider_evidence"]["asset_id"] == "ethereum"
     finally:
         settings.coingecko_api_mode = previous_mode
         app.dependency_overrides.clear()

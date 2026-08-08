@@ -11,8 +11,18 @@ from urllib.request import Request, urlopen
 from app.core.time import require_utc
 from app.core.valuation import PriceObservation, PriceProviderError
 
-ASSET_IDS = {"BTC": "bitcoin", "ETH": "ethereum"}
-MAPPING_VERSION = "coingecko-v1"
+ASSET_IDS = {
+    "ADA": "cardano",
+    "ATOM": "cosmos",
+    "BTC": "bitcoin",
+    "DOT": "polkadot",
+    "EIGEN": "eigenlayer",
+    "ETH": "ethereum",
+    "GRT": "the-graph",
+    "KAVA": "kava",
+    "XTZ": "tezos",
+}
+MAPPING_VERSION = "coingecko-asset-map-v2"
 
 
 class CoinGeckoProvider:
@@ -120,7 +130,8 @@ class CoinGeckoProvider:
         value = ASSET_IDS.get(asset.upper())
         if value is None:
             raise PriceProviderError(
-                "valuation_asset_mapping_missing", "Asset-Mapping fehlt."
+                "valuation_asset_mapping_missing",
+                f"Asset-Mapping fehlt ({MAPPING_VERSION}).",
             )
         return value
 

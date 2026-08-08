@@ -62,7 +62,7 @@ from app.database.session import get_session
 from app.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.imports.service import ImportService
 from app.imports.validation import RequiredFieldsValidator
-from app.infrastructure.coingecko import CoinGeckoProvider
+from app.infrastructure.coingecko import MAPPING_VERSION, CoinGeckoProvider
 
 router = APIRouter(prefix="/api", tags=["workflows"])
 Db = Annotated[Session, Depends(get_session)]
@@ -2010,5 +2010,5 @@ def system_status(db: Db) -> dict[str, Any]:
         "coingecko_mode": settings.coingecko_api_mode,
         "api_key_configured": bool(settings.coingecko_api_key),
         "method_version": METHOD_VERSION,
-        "asset_mapping_version": "coingecko-v1",
+        "asset_mapping_version": MAPPING_VERSION,
     }

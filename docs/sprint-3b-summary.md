@@ -66,3 +66,16 @@ explizit und nullable, sodass alte Entscheidungen lesbar bleiben, ohne Werte zu
 erfinden. Gebühren werden als steuerlich zu prüfender Kandidat ausgewiesen;
 Inventory und FIFO verwenden ausschließlich die Nettomenge. Der Sprint bleibt
 bis zum erneuten vollständigen Host-Preflight in Umsetzung.
+
+## CoinGecko-Assetregister v2
+
+Die explizite Bewertungs-Allowlist `coingecko-asset-map-v2` deckt die neun real
+vorhandenen Staking-Assets ADA, ATOM, BTC, DOT, EIGEN, ETH, GRT, KAVA und XTZ
+ab. ATOM verweist fest auf `cosmos`, EIGEN fest auf `eigenlayer`.
+Automatische Symbolsuche und unscharfe Fallbacks bleiben ausgeschlossen;
+unbekannte Assets erzeugen weiterhin einen Review. Der getrennte
+Providerantwortvertrag `market-chart-range-v1` und bestehende Entscheidungen
+werden nicht rückwirkend verändert.
+Die Zuordnung wurde vor dem ersten Commit von v2 direkt gegen `/coins/list`
+geprüft. Anzeigenamen können sich mit Projekt-Rebrandings ändern; technische
+Identität liefern die explizite CoinGecko-ID und das Symbol.

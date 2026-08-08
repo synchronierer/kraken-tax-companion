@@ -18,10 +18,30 @@ Direkte EUR-Gebühren werden nach demselben Vertrag mit ihrem EUR-Nennwert
 bewertet. Native Entscheidungen benötigen weder Tagespreis noch
 Provider-Evidenz und lösen niemals einen Providerabruf aus.
 
-Der Provider-Port kennt nur normalisierte Beobachtungen. Das versionierte
-CoinGecko-Register enthält zunächst `BTC -> bitcoin` und `ETH -> ethereum`.
-Unbekannte Assets werden nicht geraten. Provider-Evidenz wird normalisiert,
-gehasht und ohne geheime Header gespeichert.
+Der Provider-Port kennt nur normalisierte Beobachtungen. Das explizite
+CoinGecko-Register `coingecko-asset-map-v2` enthält:
+
+- `ADA -> cardano`
+- `ATOM -> cosmos`
+- `BTC -> bitcoin`
+- `DOT -> polkadot`
+- `EIGEN -> eigenlayer`
+- `ETH -> ethereum`
+- `GRT -> the-graph`
+- `KAVA -> kava`
+- `XTZ -> tezos`
+
+Das Register ist eine versionierte Allowlist. Es gibt weder eine automatische
+Symbolsuche noch eine unscharfe Auswahl oder einen Marktkapitalisierungs-
+Fallback. Unbekannte Assets führen weiterhin zum Reviewgrund
+`valuation_asset_mapping_missing`. Provider-Evidenz wird normalisiert, gehasht
+und ohne geheime Header gespeichert.
+
+Die IDs werden gegen den öffentlichen CoinGecko-Endpunkt `/coins/list`
+geprüft. Anzeigenamen und Projekt- oder Markennamen können sich ändern;
+maßgeblich bleiben die explizite Provider-ID und das zugehörige Symbol. Für
+den aktuellen Stand sind das `cosmos / atom / Cosmos Hub` und
+`eigenlayer / eigen / EigenCloud (prev. EigenLayer)`.
 
 `provider_evidence` bewahrt Provider- und Vertragskennung, explizite
 Provider-Asset-ID, Zielwährung, UTC-Anfragefenster, HTTP-Status, Abrufzeit,
@@ -52,6 +72,12 @@ Methodenversion. Providername, Asset-Mappingversion und die konkrete
 Provider-Vertragsversion liegen im Infrastructure-Adapter und werden erst mit
 der unveränderlichen ProviderEvidence persistiert. Damit kennt der Core weder
 CoinGecko noch dessen IDs oder HTTP-Vertrag.
+
+Die Mappingversion ist vom CoinGecko-Antwortvertrag getrennt. Die Erweiterung
+auf `coingecko-asset-map-v2` ändert daher nicht rückwirkend den Adaptervertrag
+`market-chart-range-v1` und hat keine Auswirkung auf bereits gespeicherte
+Bewertungsentscheidungen. Neue ProviderEvidence speichert stets die konkret
+verwendete `provider_asset_id`.
 
 Sprint 3B konsumiert ausschließlich effektive, aufgelöste
 `ValuationDecision`-Nachweise. Native EUR-, manuelle und automatische Werte

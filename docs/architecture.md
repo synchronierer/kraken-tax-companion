@@ -251,6 +251,17 @@ Import und optionale Direkttransformation verwenden dieselbe requestgebundene
 Unit-of-Work-Factory, sodass API-Dependency-Overrides und Produktionszugriffe
 garantiert denselben Datenbankkontext sehen.
 
+Das CoinGecko-Mapping ist eine explizite Infrastructure-Allowlist. Version
+`coingecko-asset-map-v2` ordnet die unterstützten Kraken-Staking-Assets ADA,
+ATOM, BTC, DOT, EIGEN, ETH, GRT, KAVA und XTZ festen Provider-IDs zu. Besonders
+`ATOM -> cosmos` und `EIGEN -> eigenlayer` werden nicht aus Symbolen
+geraten. Der Providervertrag `market-chart-range-v1` bleibt davon getrennt;
+die tatsächlich verwendete Provider-ID wird in ProviderEvidence festgehalten.
+Nicht registrierte Assets erzeugen einen Review statt einer Laufzeitsuche.
+Die Allowlist wird gegen `/coins/list` geprüft. Veränderliche Anzeigenamen
+sind informativ; die explizite ID und das Symbol bilden den technischen
+Identitätsvertrag.
+
 ## Kanonischer Kraken-Ledgervertrag
 
 CSV- und Private-REST-Adapter erzeugen denselben providerinternen

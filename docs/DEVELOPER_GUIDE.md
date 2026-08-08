@@ -130,6 +130,32 @@ Bewertungsanforderungen speichern nur Auftrag, Zielwährung, Zeitpunkt und
 Methode. Sprint 2D fragt keine Kurse ab und enthält weder Steuerjournal noch
 FIFO.
 
+## CoinGecko-Assetregister
+
+`backend/app/infrastructure/coingecko.py` besitzt mit
+`coingecko-asset-map-v2` die einzige explizite Zuordnung der unterstützten
+Bewertungsassets zu CoinGecko-IDs. Die Allowlist enthält ADA, ATOM, BTC, DOT,
+EIGEN, ETH, GRT, KAVA und XTZ; unter anderem gelten ausdrücklich
+`ATOM -> cosmos` und `EIGEN -> eigenlayer`. Neue Symbole werden nicht zur
+Laufzeit gesucht oder heuristisch ausgewählt. Ein fehlender Eintrag bleibt ein
+kontrollierter Review mit `valuation_asset_mapping_missing`.
+
+Der Hostcheck verifiziert ID, Symbol und den aktuellen Anzeigenamen gegen
+`/coins/list`. Da Anzeigenamen und Markenbezeichnungen wechseln können, sind
+für die technische Zuordnung ID und Symbol maßgeblich; Namensänderungen werden
+bewusst im Prüfer aktualisiert und nicht dynamisch in die Anwendung übernommen.
+
+Der rein lesende Hostcheck führt genau einen öffentlichen `/coins/list`-Abruf
+aus und verändert weder Datenbank noch Bewertungsläufe:
+
+```bash
+scripts/verify-coingecko-asset-map.sh
+```
+
+Ein abweichender Testendpunkt darf ausschließlich per HTTPS über
+`COINGECKO_BASE_URL` beziehungsweise `APP_COINGECKO_BASE_URL` gesetzt werden.
+Das Skript liest und protokolliert keine API-Schlüssel.
+
 ## Repository und Unit of Work
 
 Domain-Protokolle definieren Lese- und Schreiboperationen. Application-Dienste

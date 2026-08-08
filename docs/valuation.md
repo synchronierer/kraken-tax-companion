@@ -120,3 +120,27 @@ Entscheidung. `refresh_prices=true` kann neue Preise nur für noch offene
 Anforderungen laden; eine bereits entschiedene Anforderung benötigt für eine
 kontrollierte Neubewertung eine neue Methodenversion. Diese erzeugt eine neue
 Decision mit `supersedes_id`, ohne die alte Zeile zu überschreiben.
+
+## Exakte Decimal-Arithmetik
+
+Reward-v2-Produkte und Run-Summen verlassen sich nicht auf die globale
+Decimal-Standardpräzision von 28 Stellen. Getrennte Multiplikationen eines
+langpräzisen Tageskurses konnten andernfalls in der letzten Stelle gegen die
+strikte Invariante `Brutto = Netto + Gebühr` verstoßen. Der Core verwendet
+deshalb ausschließlich lokale `decimal.localcontext()`-Blöcke. Die benötigte
+Multiplikationspräzision folgt aus der Summe der Koeffizientenziffern; für
+Summen werden die Operanden auf den kleinsten Exponenten ausgerichtet und um
+die maximal mögliche Übertragsbreite ergänzt.
+
+Es gibt weder Floats noch Toleranzvergleich, fachliche Quantisierung oder
+Cent-Rundung. Mengen-, Komponenten- und aggregierte Run-Invarianten bleiben
+strikt. `ROUND_HALF_UP_DISPLAY_ONLY` gilt unverändert nur an der
+Darstellungsgrenze. `eur-valuation-v1` behält seinen historischen
+Berechnungsvertrag.
+
+SQLite persistiert `ExactDecimal` als verlustfreien String. PostgreSQL nutzt
+weiterhin `NUMERIC(38,18)`: Werte mit mehr als 18 Nachkommastellen, darunter
+der reproduzierte CoinGecko-Kurs und seine Reward-Produkte, passen nicht
+verlustfrei in diesen Vertrag. Diese getrennte Persistenzfrage erfordert vor
+einem PostgreSQL-Produktiveinsatz eine eigene Schemaentscheidung; der
+vorliegende reine Arithmetikfix ändert keine Migration oder Spalte.

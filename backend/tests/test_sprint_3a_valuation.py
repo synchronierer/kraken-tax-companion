@@ -1,7 +1,7 @@
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -46,6 +46,8 @@ from app.core.valuation import (
     daily_average,
     display_cents,
     evidence_hash,
+    exact_decimal_multiply,
+    exact_decimal_sum,
     transition_valuation_run,
     utc_day_bounds,
 )
@@ -114,6 +116,12 @@ def test_calculation_contract() -> None:
             "1.234567890123456789",
         ),
         ("2.34567891", "0", "2.34567891", "40000.123456789012345678"),
+        (
+            "12345678901234567890.123456789",
+            "0.123456789",
+            "12345678901234567890",
+            "987654321.123456789012345678",
+        ),
     ],
 )
 def test_reward_valuation_v2_preserves_exact_components(
@@ -128,12 +136,15 @@ def test_reward_valuation_v2_preserves_exact_components(
         unit_price_eur=Decimal(unit),
         method_version=METHOD_VERSION,
     )
-    assert result.gross_income_eur == Decimal(gross) * Decimal(unit)
-    assert result.fee_value_eur == Decimal(fee) * Decimal(unit)
-    assert result.net_acquisition_value_eur == Decimal(net) * Decimal(unit)
-    assert (
-        result.gross_income_eur
-        == result.net_acquisition_value_eur + result.fee_value_eur
+    assert result.gross_income_eur == exact_decimal_multiply(
+        Decimal(gross), Decimal(unit)
+    )
+    assert result.fee_value_eur == exact_decimal_multiply(Decimal(fee), Decimal(unit))
+    assert result.net_acquisition_value_eur == exact_decimal_multiply(
+        Decimal(net), Decimal(unit)
+    )
+    assert result.gross_income_eur == exact_decimal_sum(
+        (result.net_acquisition_value_eur, result.fee_value_eur)
     )
     assert result.fee_tax_review_status is (
         FeeTaxReviewStatus.REVIEW_REQUIRED
@@ -145,6 +156,93 @@ def test_reward_valuation_v2_preserves_exact_components(
         if Decimal(fee)
         else FeeTaxClassification.NOT_APPLICABLE
     )
+
+
+def test_reward_valuation_v2_uses_operand_driven_decimal_precision() -> None:
+    unit = Decimal("1.393395260395307108333333333")
+    gross = Decimal("0.0259233001")
+    net = Decimal("0.0194382301")
+    fee = Decimal("0.00648507")
+
+    with localcontext() as legacy_context:
+        legacy_context.prec = 28
+        rounded_gross = gross * unit
+        rounded_parts = net * unit + fee * unit
+    assert rounded_gross != rounded_parts
+
+    result = calculate_reward_valuation(
+        net_quantity=net,
+        gross_quantity=gross,
+        fee_quantity=fee,
+        asset_code="KAVA",
+        fee_asset="KAVA",
+        unit_price_eur=unit,
+        method_version=METHOD_VERSION,
+    )
+
+    assert result.gross_income_eur == Decimal("0.0361214034931451908009882108246922333")
+    assert result.net_acquisition_value_eur == Decimal(
+        "0.0270851376918133965319489608268539233"
+    )
+    assert result.fee_value_eur == Decimal("0.00903626580133179426903924999783831")
+    assert isinstance(result.gross_income_eur, Decimal)
+    assert isinstance(result.fee_value_eur, Decimal)
+    assert isinstance(result.net_acquisition_value_eur, Decimal)
+    assert result.gross_income_eur == exact_decimal_sum(
+        (result.net_acquisition_value_eur, result.fee_value_eur)
+    )
+    assert result.gross_income_eur.as_tuple().exponent == -37
+    decision = ValuationDecision(
+        valuation_requirement_id=uuid4(),
+        valuation_run_id=uuid4(),
+        domain_object_type="AcquisitionLot",
+        domain_object_id=uuid4(),
+        asset_code="KAVA",
+        quantity=net,
+        valuation_at=NOW,
+        price_date=DAY,
+        method=PriceMethod.DAILY_AVERAGE_HOURLY,
+        unit_price_eur=unit,
+        eur_value=result.net_acquisition_value_eur,
+        price_source="Synthetischer Präzisionstest",
+        provider="synthetic",
+        provider_object_id=None,
+        provider_contract_version="synthetic-v1",
+        method_version=METHOD_VERSION,
+        sample_count=24,
+        fetched_at=NOW,
+        decided_at=NOW,
+        status=ValuationDecisionStatus.RESOLVED,
+        reason_code="valuation_resolved",
+        gross_quantity=gross,
+        fee_quantity=fee,
+        net_quantity=net,
+        gross_income_eur=result.gross_income_eur,
+        fee_value_eur=result.fee_value_eur,
+        net_acquisition_value_eur=result.net_acquisition_value_eur,
+        valuation_basis="staking_reward_components_v2",
+        fee_tax_classification=FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE,
+        fee_tax_review_status=FeeTaxReviewStatus.REVIEW_REQUIRED,
+    )
+    assert decision.net_acquisition_value_eur is not None
+    assert decision.fee_value_eur is not None
+    assert decision.gross_income_eur == exact_decimal_sum(
+        (decision.net_acquisition_value_eur, decision.fee_value_eur)
+    )
+
+
+def test_exact_decimal_arithmetic_supports_different_exponents() -> None:
+    values = (Decimal("9.999E+40"), Decimal("0.000000000000000000000000000123"))
+    total = exact_decimal_sum(values)
+
+    assert total == Decimal(
+        "99990000000000000000000000000000000000000.000000000000000000000000000123"
+    )
+    assert exact_decimal_multiply(
+        Decimal("0.00000001"), Decimal("123456789.123456789")
+    ) == Decimal("1.23456789123456789")
+    with pytest.raises(ValueError, match="finite"):
+        exact_decimal_sum((Decimal("NaN"),))
 
 
 def test_reward_valuation_versions_and_legacy_lot_fallback() -> None:
@@ -1360,11 +1458,16 @@ def test_55_reward_matrix_reuses_one_price_per_asset_and_creates_no_tax_state() 
         TaxTreatmentHint,
     )
 
-    engine = create_engine("sqlite://")
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine, expire_on_commit=False)
     assets = ("ADA", "ATOM", "BTC", "DOT", "EIGEN", "ETH", "GRT", "KAVA", "XTZ")
     price_date = date(2026, 1, 2)
+    unit_price = Decimal("1.393395260395307108333333333")
     with sessions() as database:
         transformation = TransformationRun(
             contract_version="kraken-domain-v2",
@@ -1381,7 +1484,7 @@ def test_55_reward_matrix_reuses_one_price_per_asset_and_creates_no_tax_state() 
                 DailyPrice(
                     asset_code=asset,
                     price_date=price_date,
-                    unit_price_eur=Decimal("10"),
+                    unit_price_eur=unit_price,
                     method=PriceMethod.MANUAL_DAILY_PRICE,
                     source="Synthetische Matrix",
                     provider="manual",
@@ -1430,19 +1533,141 @@ def test_55_reward_matrix_reuses_one_price_per_asset_and_creates_no_tax_state() 
             )
         database.commit()
 
-        result = run_valuations(database, method_version=METHOD_VERSION)
+    def dependency() -> object:
+        with sessions() as database:
+            yield database
 
+    app.dependency_overrides[get_session] = dependency
+    try:
+        with TestClient(app) as local_client:
+            response = local_client.post("/api/valuations")
+            assert response.status_code == 200
+            result = response.json()
+    finally:
+        app.dependency_overrides.clear()
+
+    with sessions() as database:
         decisions = tuple(database.scalars(select(ValuationDecision)))
         assert result["checked"] == result["resolved"] == 55
         assert result["reviews"] == 0
-        assert result["gross_income_total_eur"] == "550"
-        assert result["fee_candidate_total_eur"] == "55.0"
-        assert result["net_acquisition_total_eur"] == "495.0"
+        gross_total = Decimal(result["gross_income_total_eur"])
+        fee_total = Decimal(result["fee_candidate_total_eur"])
+        net_total = Decimal(result["net_acquisition_total_eur"])
+        expected_gross = exact_decimal_sum((unit_price,) * 55)
+        expected_fee = exact_decimal_sum(
+            (exact_decimal_multiply(Decimal("0.1"), unit_price),) * 55
+        )
+        expected_net = exact_decimal_sum(
+            (exact_decimal_multiply(Decimal("0.9"), unit_price),) * 55
+        )
+        assert gross_total == expected_gross
+        assert fee_total == expected_fee
+        assert net_total == expected_net
+        assert gross_total == exact_decimal_sum((net_total, fee_total))
         assert len(decisions) == 55
+        for decision in decisions:
+            assert decision.gross_income_eur is not None
+            assert decision.net_acquisition_value_eur is not None
+            assert decision.fee_value_eur is not None
+            assert decision.gross_income_eur == exact_decimal_sum(
+                (decision.net_acquisition_value_eur, decision.fee_value_eur)
+            )
+        assert decisions[0].unit_price_eur == unit_price
         assert len({item.provider_object_id for item in decisions}) == len(assets)
         assert database.scalar(select(func.count()).select_from(DailyPrice)) == 9
         assert database.scalar(select(func.count()).select_from(InventoryLot)) == 0
         assert database.scalar(select(func.count()).select_from(TaxCalculationRun)) == 0
+
+
+def test_unexpected_reward_decision_error_rolls_back_valuation_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.entities import AuditEvent
+    from app.core.transformation import (
+        AcquisitionLot,
+        AcquisitionType,
+        TaxTreatmentHint,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    lot = AcquisitionLot(
+        stable_key="precision-rollback",
+        payload_hash="f" * 64,
+        asset_raw_code="BTC",
+        asset_code="BTC",
+        asset_mapping_version="kraken-assets-v2",
+        quantity=Decimal("0.0194382301"),
+        gross_quantity=Decimal("0.0259233001"),
+        fee_quantity=Decimal("0.00648507"),
+        fee_asset="BTC",
+        occurred_at=datetime(2026, 1, 2, tzinfo=UTC),
+        acquisition_type=AcquisitionType.STAKING_REWARD,
+        provider="kraken",
+        account_scope="default",
+        wallet_scope="kraken-spot",
+        external_id="precision-rollback",
+        transformation_version="kraken-domain-v2",
+        valuation_status=ValuationStatus.VALUATION_REQUIRED,
+        tax_treatment_hint=TaxTreatmentHint.PASSIVE_STAKING_REWARD,
+    )
+    requirement = ValuationRequirement(
+        asset_code="BTC",
+        target_currency="EUR",
+        valuation_at=lot.occurred_at,
+        method=ValuationMethod.DAILY_AVERAGE,
+        status=ValuationStatus.VALUATION_REQUIRED,
+        reason_code="reward_inflow",
+        domain_object_type="AcquisitionLot",
+        domain_object_id=lot.id,
+        transformation_run_id=uuid4(),
+    )
+    with sessions() as database:
+        database.add_all((lot, requirement))
+        database.commit()
+
+    def dependency() -> object:
+        with sessions() as database:
+            yield database
+
+    day_start = datetime(2026, 1, 2, tzinfo=UTC)
+    hourly = tuple(
+        PriceObservation(
+            observed_at=day_start + timedelta(hours=index),
+            price_eur=Decimal("1.393395260395307108333333333"),
+        )
+        for index in range(24)
+    )
+
+    def fail_decision(_: ValuationDecision) -> None:
+        raise RuntimeError("synthetic decision persistence failure")
+
+    settings = get_settings()
+    previous_mode = settings.coingecko_api_mode
+    settings.coingecko_api_mode = "keyless"
+    monkeypatch.setattr(CoinGeckoProvider, "observations", lambda *_: hourly)
+    monkeypatch.setattr(ValuationDecision, "__post_init__", fail_decision)
+    app.dependency_overrides[get_session] = dependency
+    try:
+        with TestClient(app, raise_server_exceptions=False) as local_client:
+            response = local_client.post("/api/valuations")
+            assert response.status_code == 500
+            assert response.json()["detail"]["code"] == "internal_server_error"
+    finally:
+        settings.coingecko_api_mode = previous_mode
+        app.dependency_overrides.clear()
+
+    with sessions() as database:
+        assert database.scalar(select(func.count()).select_from(ValuationRun)) == 0
+        assert database.scalar(select(func.count()).select_from(DailyPrice)) == 0
+        assert database.scalar(select(func.count()).select_from(ProviderEvidence)) == 0
+        assert database.scalar(select(func.count()).select_from(ValuationDecision)) == 0
+        assert database.scalar(select(func.count()).select_from(AuditEvent)) == 0
 
 
 def test_existing_provider_evidence_is_reused(

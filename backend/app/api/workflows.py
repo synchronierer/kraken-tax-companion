@@ -54,6 +54,7 @@ from app.core.valuation import (
     calculate_reward_valuation,
     daily_average,
     evidence_hash,
+    exact_decimal_sum,
     transition_valuation_run,
     utc_day_bounds,
 )
@@ -967,9 +968,9 @@ def valuations(
     refresh_prices: bool = False,
 ) -> dict[str, Any]:
     settings, now = get_settings(), utc_now()
-    gross_income_total = Decimal("0")
-    fee_candidate_total = Decimal("0")
-    net_acquisition_total = Decimal("0")
+    gross_income_values: list[Decimal] = []
+    fee_candidate_values: list[Decimal] = []
+    net_acquisition_values: list[Decimal] = []
     run = ValuationRun(
         provider="coingecko",
         correlation_id=uuid4(),
@@ -1409,15 +1410,15 @@ def valuations(
             if decision.status == ValuationDecisionStatus.RESOLVED:
                 run.resolved_requirements += 1
                 if decision.gross_income_eur is not None:
-                    gross_income_total += decision.gross_income_eur
+                    gross_income_values.append(decision.gross_income_eur)
                 if (
                     decision.fee_value_eur is not None
                     and decision.fee_tax_classification
                     is FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
                 ):
-                    fee_candidate_total += decision.fee_value_eur
+                    fee_candidate_values.append(decision.fee_value_eur)
                 if decision.net_acquisition_value_eur is not None:
-                    net_acquisition_total += decision.net_acquisition_value_eur
+                    net_acquisition_values.append(decision.net_acquisition_value_eur)
                 if method == PriceMethod.NATIVE_EUR:
                     run.native_count += 1
                 elif method == PriceMethod.MANUAL_DAILY_PRICE:
@@ -1472,9 +1473,9 @@ def valuations(
         "checked": run.checked_requirements,
         "resolved": run.resolved_requirements,
         "reviews": run.review_count,
-        "gross_income_total_eur": str(gross_income_total),
-        "fee_candidate_total_eur": str(fee_candidate_total),
-        "net_acquisition_total_eur": str(net_acquisition_total),
+        "gross_income_total_eur": str(exact_decimal_sum(gross_income_values)),
+        "fee_candidate_total_eur": str(exact_decimal_sum(fee_candidate_values)),
+        "net_acquisition_total_eur": str(exact_decimal_sum(net_acquisition_values)),
     }
 
 

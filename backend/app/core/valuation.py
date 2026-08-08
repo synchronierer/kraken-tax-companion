@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from enum import StrEnum
 from hashlib import sha256
 from typing import Any, Protocol
@@ -44,6 +44,40 @@ class RewardValuationComponents:
     valuation_basis: str
     fee_tax_classification: FeeTaxClassification
     fee_tax_review_status: FeeTaxReviewStatus
+
+
+def _finite_decimal_parts(value: Decimal) -> tuple[int, int]:
+    parts = value.as_tuple()
+    if not isinstance(parts.exponent, int):
+        raise ValueError("Exact arithmetic requires finite Decimal operands.")
+    return len(parts.digits), parts.exponent
+
+
+def exact_decimal_multiply(left: Decimal, right: Decimal) -> Decimal:
+    """Multiply finite decimals without context rounding."""
+
+    left_digits, _ = _finite_decimal_parts(left)
+    right_digits, _ = _finite_decimal_parts(right)
+    with localcontext() as context:
+        context.prec = max(1, left_digits + right_digits)
+        return left * right
+
+
+def exact_decimal_sum(values: Sequence[Decimal]) -> Decimal:
+    """Sum finite decimals exactly, including widely different exponents."""
+
+    items = tuple(values)
+    if not items:
+        return Decimal("0")
+    parts = tuple(_finite_decimal_parts(value) for value in items)
+    minimum_exponent = min(exponent for _, exponent in parts)
+    aligned_digits = max(
+        digits + exponent - minimum_exponent for digits, exponent in parts
+    )
+    carry_digits = len(str(len(items)))
+    with localcontext() as context:
+        context.prec = max(1, aligned_digits + carry_digits)
+        return sum(items, Decimal("0"))
 
 
 class PriceMethod(StrEnum):
@@ -286,7 +320,8 @@ class ValuationDecision:
             and self.fee_quantity is not None
             and (
                 self.net_quantity is None
-                or self.gross_quantity != self.net_quantity + self.fee_quantity
+                or self.gross_quantity
+                != exact_decimal_sum((self.net_quantity, self.fee_quantity))
             )
         ):
             raise ValueError("Reward quantities are inconsistent.")
@@ -296,7 +331,9 @@ class ValuationDecision:
             and (
                 self.net_acquisition_value_eur is None
                 or self.gross_income_eur
-                != self.net_acquisition_value_eur + self.fee_value_eur
+                != exact_decimal_sum(
+                    (self.net_acquisition_value_eur, self.fee_value_eur)
+                )
             )
         ):
             raise ValueError("Reward EUR components are inconsistent.")
@@ -424,8 +461,8 @@ def calculate_reward_valuation(
             "valuation_reward_quantity_inconsistent",
             "Die Mengen des Staking-Rewards sind ungültig.",
         )
-    if effective_fee > effective_gross or (
-        effective_gross != net_quantity + effective_fee
+    if effective_fee > effective_gross or effective_gross != exact_decimal_sum(
+        (net_quantity, effective_fee)
     ):
         raise RewardValuationError(
             "valuation_reward_quantity_inconsistent",
@@ -436,9 +473,9 @@ def calculate_reward_valuation(
             "valuation_reward_fee_asset_mismatch",
             "Reward und einbehaltene Gebühr verwenden unterschiedliche Assets.",
         )
-    gross_income = effective_gross * unit_price_eur
-    fee_value = effective_fee * unit_price_eur
-    net_value = net_quantity * unit_price_eur
+    gross_income = exact_decimal_multiply(effective_gross, unit_price_eur)
+    fee_value = exact_decimal_multiply(effective_fee, unit_price_eur)
+    net_value = exact_decimal_multiply(net_quantity, unit_price_eur)
     has_fee = effective_fee > 0
     return RewardValuationComponents(
         gross_quantity=effective_gross,

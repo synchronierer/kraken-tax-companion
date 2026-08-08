@@ -1,7 +1,8 @@
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
-from sqlalchemy import DateTime, create_engine
+from sqlalchemy import DateTime, Numeric, create_engine
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from app.database.mappings import (
 from app.database.session import get_session
 from app.database.types import (
     STRUCTURED_JSON,
+    ExactDecimal,
     UtcDateTime,
     compare_database_type,
 )
@@ -141,3 +143,22 @@ def test_structured_json_uses_jsonb_only_on_postgresql() -> None:
         column_type = table.c[column_name].type
         assert str(column_type.compile(dialect=postgres_dialect)) == "JSONB"
         assert str(column_type.compile(dialect=sqlite_dialect)) == "JSON"
+
+
+def test_exact_decimal_sqlite_roundtrip_and_postgresql_contract() -> None:
+    decimal_type = ExactDecimal()
+    sqlite_dialect = sqlite.dialect()
+    postgres_dialect = create_engine(
+        "postgresql+psycopg://synthetic:synthetic@localhost/synthetic"
+    ).dialect
+    value = Decimal("0.0361214034931451908009882108246922333")
+
+    sqlite_bound = decimal_type.process_bind_param(value, sqlite_dialect)
+    assert sqlite_bound == "0.0361214034931451908009882108246922333"
+    assert decimal_type.process_result_value(sqlite_bound, sqlite_dialect) == value
+
+    postgres_type = decimal_type.load_dialect_impl(postgres_dialect)
+    assert isinstance(postgres_type, Numeric)
+    assert postgres_type.precision == 38
+    assert postgres_type.scale == 18
+    assert decimal_type.process_bind_param(value, postgres_dialect) is value

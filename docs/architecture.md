@@ -194,6 +194,12 @@ Die eigenständige Provider-Evidenz liegt zwischen HTTP-Adapter und Tagespreis.
 Sie speichert nur begrenzte normalisierte Beobachtungen und keine geheimen
 Requestdaten.
 
+Reward-Komponenten und deren Run-Summen verwenden operandengesteuerte lokale
+Decimal-Kontexte. Multiplikationen reservieren die vollständige mögliche
+Koeffizientenbreite; Summen berücksichtigen Exponentenausrichtung und
+Übertrag. Damit bleiben die Invarianten ohne Float, Toleranz oder fachliche
+Rundung exakt, ohne den globalen Decimal-Kontext zu verändern.
+
 Tagespreise und Bewertungsentscheidungen sind append-only. Duplikate werden
 erkannt; Korrekturen und neue Methoden- oder Providervertragsversionen
 erzeugen Nachfolger mit `supersedes_id`. API-Details bilden die Kette von

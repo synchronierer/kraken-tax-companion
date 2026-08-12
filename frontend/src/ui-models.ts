@@ -10,6 +10,64 @@ export function displayValue(value: DisplayValue): string {
   return String(value);
 }
 
+const eurFormatter = new Intl.NumberFormat("de-DE", {
+  style: "currency",
+  currency: "EUR",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+const quantityFormatter = new Intl.NumberFormat("de-DE", {
+  useGrouping: false,
+  maximumFractionDigits: 8,
+});
+
+export function formatEurDecimal(value: string | number): string {
+  return eurFormatter.format(Number(value));
+}
+
+export function formatAssetQuantity(value: string): string {
+  return quantityFormatter.format(Number(value));
+}
+
+export function sumDecimalStrings(values: string[]): string {
+  const parsed = values.map((value) => {
+    const match = /^(?<sign>-?)(?<integer>\d+)(?:\.(?<fraction>\d+))?$/.exec(value);
+    if (!match?.groups) throw new Error("Ungültiger Decimal-String.");
+    return {
+      negative: match.groups.sign === "-",
+      integer: match.groups.integer,
+      fraction: match.groups.fraction ?? "",
+    };
+  });
+  const scale = Math.max(0, ...parsed.map((value) => value.fraction.length));
+  const total = parsed.reduce((result, value) => {
+    const digits = `${value.integer}${value.fraction.padEnd(scale, "0")}`;
+    return result + BigInt(`${value.negative ? "-" : ""}${digits}`);
+  }, 0n);
+  const negative = total < 0n;
+  const absolute = (negative ? -total : total).toString().padStart(scale + 1, "0");
+  if (scale === 0) return `${negative ? "-" : ""}${absolute}`;
+  const integer = absolute.slice(0, -scale);
+  const fraction = absolute.slice(-scale).replace(/0+$/, "");
+  return `${negative ? "-" : ""}${integer}${fraction ? `.${fraction}` : ""}`;
+}
+
+export function reviewDecisionLabel(decision: string): string {
+  return decision === "include_as_werbungskosten"
+    ? "als Werbungskosten berücksichtigen"
+    : "nicht als Werbungskosten berücksichtigen";
+}
+
+export function reviewSubmissionAction(
+  selectedCount: number,
+  decision: string,
+  reason: string,
+): "invalid" | "confirm" | "submit" {
+  if (selectedCount < 1 || !decision || !reason.trim()) return "invalid";
+  return selectedCount > 1 ? "confirm" : "submit";
+}
+
 export function isEmptyDashboard(values: {
   imports: number;
   raw_records: number;

@@ -110,6 +110,37 @@ test("presentation rules cover empty state, validation, reviews and secrets", as
     [["backend", true], ["api_key_configured", true]],
   );
   assert.equal(model.pageQuery(-1, 1000), "offset=0&limit=200");
+  assert.equal(
+    model.formatEurDecimal("11.964719979423988667047664309258439466617"),
+    "11,96 €",
+  );
+  assert.equal(model.formatEurDecimal("0.0140694201443203559150371395821465577"), "0,01 €");
+  assert.equal(model.formatAssetQuantity("0.3560326900"), "0,35603269");
+  assert.equal(model.formatAssetQuantity("0.1280751569"), "0,12807516");
+  assert.equal(
+    model.sumDecimalStrings([
+      "11.900000000000000000000000000000000000001",
+      "0.064719979423988667047664309258439466616",
+    ]),
+    "11.964719979423988667047664309258439466617",
+  );
+  assert.equal(
+    model.reviewDecisionLabel("include_as_werbungskosten"),
+    "als Werbungskosten berücksichtigen",
+  );
+  assert.equal(
+    model.reviewDecisionLabel("exclude_from_werbungskosten"),
+    "nicht als Werbungskosten berücksichtigen",
+  );
+  assert.equal(model.reviewSubmissionAction(0, "", ""), "invalid");
+  assert.equal(
+    model.reviewSubmissionAction(1, "include_as_werbungskosten", "Begründung"),
+    "submit",
+  );
+  assert.equal(
+    model.reviewSubmissionAction(48, "include_as_werbungskosten", "Begründung"),
+    "confirm",
+  );
 });
 
 test("staking fee review requires an explicit decision and separate tax run", async () => {
@@ -119,6 +150,14 @@ test("staking fee review requires an explicit decision and separate tax run", as
   assert.match(source, /Als Werbungskosten berücksichtigen/);
   assert.match(source, /Nicht als Werbungskosten berücksichtigen/);
   assert.match(source, /Begründung/);
+  assert.match(source, /reviewSubmissionAction\(selected\.length,decision,reason\)/);
+  assert.match(source, /Sammelentscheidung bestätigen/);
+  assert.match(source, /Fälle mit insgesamt/);
+  assert.match(source, /Abbrechen/);
+  assert.match(source, /disabled={!selected\.length\|\|!decision\|\|!reason\.trim\(\)}/);
+  assert.match(source, /formatEurDecimal\(item\.fee_value_eur\)/);
+  assert.match(source, /formatAssetQuantity\(item\.fee_quantity\)/);
+  assert.equal((source.match(/request<Row>\("\/api\/tax-review-decisions\/bulk"/g) ?? []).length, 1);
   assert.match(source, /neuer Taxlauf erforderlich/);
   assert.doesNotMatch(source, /tax-review-decisions[\s\S]{0,500}tax-calculations/);
 });

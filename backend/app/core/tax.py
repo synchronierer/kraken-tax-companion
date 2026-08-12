@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from enum import StrEnum
 from hashlib import sha256
 from typing import Final
@@ -10,6 +10,11 @@ from app.core.entities import positive_decimal, required_text
 from app.core.identifiers import new_id
 from app.core.time import require_utc, utc_now
 from app.core.transformation import non_negative_decimal
+from app.core.valuation import (
+    exact_decimal_multiply,
+    exact_decimal_subtract,
+    exact_decimal_sum,
+)
 
 FIFO_RULE_VERSION: Final = "fifo-utc-stable-v1"
 FEE_RULE_VERSION: Final = "proportional-last-remainder-v1"
@@ -418,7 +423,9 @@ def tax_snapshot_hash(
 
 
 def _share(total: Decimal, quantity: Decimal, full_quantity: Decimal) -> Decimal:
-    return total * quantity / full_quantity
+    exact_numerator = exact_decimal_multiply(total, quantity)
+    with localcontext():
+        return exact_numerator / full_quantity
 
 
 def calculate_fifo(
@@ -448,7 +455,7 @@ def calculate_fifo(
             acquired_at=item.acquired_at,
             acquisition_value_eur=item.value_eur,
             acquisition_fee_eur=item.fee_eur,
-            remaining_cost_eur=item.value_eur + item.fee_eur,
+            remaining_cost_eur=exact_decimal_sum((item.value_eur, item.fee_eur)),
             valuation_decision_id=item.valuation_decision_id,
             rule_version=rules.fifo,
             sequence=index,
@@ -477,11 +484,11 @@ def calculate_fifo(
                 else (
                     Decimal("0")
                     if "staking" in item.acquisition_type
-                    else item.value_eur + item.fee_eur
+                    else exact_decimal_sum((item.value_eur, item.fee_eur))
                 )
             ),
             proceeds_eur=None,
-            acquisition_cost_eur=item.value_eur + item.fee_eur,
+            acquisition_cost_eur=exact_decimal_sum((item.value_eur, item.fee_eur)),
             gain_loss_eur=None,
             holding_seconds=None,
             classification=(
@@ -536,22 +543,26 @@ def calculate_fifo(
                 lot.remaining_cost_eur
                 if is_last_lot_part
                 else _share(
-                    lot.acquisition_value_eur + lot.acquisition_fee_eur,
+                    exact_decimal_sum(
+                        (lot.acquisition_value_eur, lot.acquisition_fee_eur)
+                    ),
                     quantity,
                     lot.original_quantity,
                 )
             )
             part_proceeds = (
-                disposal.proceeds_eur - proceeds
+                exact_decimal_subtract(disposal.proceeds_eur, proceeds)
                 if is_last_disposal_part
                 else _share(disposal.proceeds_eur, quantity, disposal.quantity)
             )
             part_fee = (
-                disposal.fee_eur - fees
+                exact_decimal_subtract(disposal.fee_eur, fees)
                 if is_last_disposal_part
                 else _share(disposal.fee_eur, quantity, disposal.quantity)
             )
-            gain = part_proceeds - part_fee - cost
+            gain = exact_decimal_sum(
+                (part_proceeds, part_fee.copy_negate(), cost.copy_negate())
+            )
             allocation = LotAllocation(
                 tax_calculation_run_id=run_id,
                 disposal_event_id=disposal.disposal_id,
@@ -571,13 +582,17 @@ def calculate_fifo(
                 fee_rule_version=rules.fees,
             )
             allocations.append(allocation)
-            lot.remaining_quantity -= quantity
-            lot.remaining_cost_eur -= cost
-            remaining -= quantity
-            allocated += quantity
-            costs += cost
-            proceeds += part_proceeds
-            fees += part_fee
+            lot.remaining_quantity = exact_decimal_sum(
+                (lot.remaining_quantity, quantity.copy_negate())
+            )
+            lot.remaining_cost_eur = exact_decimal_subtract(
+                lot.remaining_cost_eur, cost
+            )
+            remaining = exact_decimal_subtract(remaining, quantity)
+            allocated = exact_decimal_sum((allocated, quantity))
+            costs = exact_decimal_sum((costs, cost))
+            proceeds = exact_decimal_sum((proceeds, part_proceeds))
+            fees = exact_decimal_sum((fees, part_fee))
             journal.append(
                 TaxJournalEntry(
                     tax_calculation_run_id=run_id,
@@ -648,7 +663,9 @@ def calculate_fifo(
                 proceeds_eur=proceeds,
                 acquisition_cost_eur=costs,
                 fees_eur=fees,
-                gain_loss_eur=proceeds - fees - costs,
+                gain_loss_eur=exact_decimal_sum(
+                    (proceeds, fees.copy_negate(), costs.copy_negate())
+                ),
                 status=status,
                 rule_version=rules.classification,
             )
@@ -668,7 +685,9 @@ def calculate_fifo(
                 eur_value=disposal.proceeds_eur,
                 proceeds_eur=disposal.proceeds_eur,
                 acquisition_cost_eur=costs,
-                gain_loss_eur=proceeds - fees - costs,
+                gain_loss_eur=exact_decimal_sum(
+                    (proceeds, fees.copy_negate(), costs.copy_negate())
+                ),
                 holding_seconds=None,
                 classification="Arbeitsdokumentation: Veräußerung",
                 rule_version=rules.journal,

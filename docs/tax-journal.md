@@ -15,6 +15,12 @@ Reviewfälle, unvollständige Veräußerungen und Restbestände bleiben sichtbar
 Die Regelkennungen sind zentral versioniert und werden mit jedem Lauf und
 Nachweis gespeichert.
 
+Alle endlichen Summen und Differenzen des Journals, der Bestände und der
+Jahresübersicht werden mit operandengesteuerter lokaler Decimal-Präzision
+gebildet. Lange EUR-Werte bleiben dadurch auch beim Addieren von null und beim
+Aggregieren vieler Rewards unverändert. Es gibt weder Floatkonvertierung noch
+fachliche Rundung oder Toleranzvergleich.
+
 Für Staking-Rewards konsumiert das Journal ab `eur-valuation-v2` ausdrücklich
 den Bruttoertrag. Der InventoryLot verwendet dagegen nur Nettomenge und
 Netto-Anschaffungswert. Die einbehaltene Plattformgebühr bleibt ein getrennt
@@ -22,6 +28,14 @@ ausgewiesener `werbungskosten_candidate` und erzeugt einen Prüffall, bis ihre
 steuerliche Behandlung bestätigt ist. Eine historische v1-Entscheidung ohne
 Bruttokomponente wird nicht als vermeintlicher Bruttoertrag übernommen,
 sondern als Reviewzeile ausgewiesen.
+
+Ein Lauf mit solchen Gebührenkandidaten endet fachlich erfolgreich als
+`completed_with_review`: Inventar und Journal sind reproduzierbar erzeugt,
+die steuerliche Anerkennung der Gebühr bleibt aber offen. Die Kennzahl
+`provisional_net_staking_income` ist ausdrücklich nur Bruttoertrag abzüglich
+der noch zu prüfenden Gebührenkandidaten und keine endgültige steuerliche
+Feststellung. Reviews werden ausschließlich durch nachvollziehbare fachliche
+Aktionen aufgelöst; direkte Datenbankänderungen sind kein zulässiger Weg.
 
 Diese Änderung ist durch `private-assets-reward-fee-review-v2`,
 `tax-journal-reward-gross-v2` und `tax-export-reward-components-v2`

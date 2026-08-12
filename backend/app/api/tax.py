@@ -57,6 +57,8 @@ from app.core.valuation import (
     ProviderEvidence,
     ValuationDecision,
     ValuationDecisionStatus,
+    exact_decimal_subtract,
+    exact_decimal_sum,
 )
 from app.database.session import get_session
 from app.services.tax_exports import (
@@ -379,8 +381,8 @@ def _fee_values(
     for fee in _list(db, FeeEvent):
         decision = decisions.get(fee.id)
         if decision is not None:
-            values[fee.related_object_id] = (
-                values.get(fee.related_object_id, Decimal("0")) + decision.eur_value
+            values[fee.related_object_id] = exact_decimal_sum(
+                (values.get(fee.related_object_id, Decimal("0")), decision.eur_value)
             )
     return values
 
@@ -1046,51 +1048,47 @@ def tax_summary(db: Db, year: int = Query(ge=1970, le=9999)) -> dict[str, Any]:
         for item in _list(db, InventoryLot)
         if run and item.tax_calculation_run_id == run.id
     ]
-    gains = sum(
-        (
+    gains = exact_decimal_sum(
+        tuple(
             item.gain_loss_eur or Decimal("0")
             for item in journal
             if item.entry_type == JournalEntryType.REALIZED_GAIN
             and item.gain_loss_eur
             and item.gain_loss_eur > 0
-        ),
-        Decimal("0"),
+        )
     )
-    losses = -sum(
-        (
-            item.gain_loss_eur or Decimal("0")
+    losses = exact_decimal_sum(
+        tuple(
+            (item.gain_loss_eur or Decimal("0")).copy_negate()
             for item in journal
             if item.entry_type == JournalEntryType.REALIZED_LOSS
             and item.gain_loss_eur
             and item.gain_loss_eur < 0
-        ),
-        Decimal("0"),
+        )
     )
-    fees = sum((item.fees_eur for item in calculations), Decimal("0"))
+    fees = exact_decimal_sum(tuple(item.fees_eur for item in calculations))
     current_decisions = tuple(_latest_decisions(db).values())
-    gross_staking_income = sum(
-        (
+    gross_staking_income = exact_decimal_sum(
+        tuple(
             item.gross_income_eur
             for item in current_decisions
             if item.price_date.year == year and item.gross_income_eur is not None
-        ),
-        Decimal("0"),
+        )
     )
-    staking_fee_candidates = sum(
-        (
+    staking_fee_candidates = exact_decimal_sum(
+        tuple(
             item.fee_value_eur
             for item in current_decisions
             if item.price_date.year == year
             and item.fee_value_eur is not None
             and item.fee_tax_classification
             is FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
-        ),
-        Decimal("0"),
+        )
     )
     inventory: dict[str, Decimal] = {}
     for lot in lots:
-        inventory[lot.asset_code] = (
-            inventory.get(lot.asset_code, Decimal("0")) + lot.remaining_quantity
+        inventory[lot.asset_code] = exact_decimal_sum(
+            (inventory.get(lot.asset_code, Decimal("0")), lot.remaining_quantity)
         )
     resolved_requirement_ids = {
         decision.valuation_requirement_id for decision in _latest_decisions(db).values()
@@ -1112,12 +1110,12 @@ def tax_summary(db: Db, year: int = Query(ge=1970, le=9999)) -> dict[str, Any]:
         ),
         "realized_gains": str(gains),
         "realized_losses": str(losses),
-        "net_result": str(gains - losses),
+        "net_result": str(exact_decimal_subtract(gains, losses)),
         "fees": str(fees),
         "gross_staking_income": str(gross_staking_income),
         "staking_fee_candidates": str(staking_fee_candidates),
         "provisional_net_staking_income": str(
-            gross_staking_income - staking_fee_candidates
+            exact_decimal_subtract(gross_staking_income, staking_fee_candidates)
         ),
         "open_valuations": open_valuations,
         "open_reviews": run.review_count if run else 0,

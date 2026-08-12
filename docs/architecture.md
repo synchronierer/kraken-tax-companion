@@ -314,3 +314,12 @@ FIFO erhält ausschließlich Nettomenge und Netto-Anschaffungswert. Das
 Steuerjournal liest den Bruttoertrag aus dem expliziten Feld und behandelt die
 Plattformgebühr als überprüfbaren Kandidaten. Damit kann keine generische
 `eur_value`-Spalte versehentlich zugleich Ertrag und Bestandswert bedeuten.
+
+Tax-Core und Tax-API verwenden für endliche Decimal-Operationen dieselbe
+operandengesteuerte Exaktarithmetik wie die Rewardbewertung. Lokale Kontexte
+decken die vollständigen Koeffizienten und Exponenten der konkreten Operanden
+ab; der globale Kontext bleibt unverändert. Das gilt für Inventarkosten,
+Journalwerte, FIFO-Akkumulatoren sowie Gewinn-, Verlust-, Bestands- und
+Reward-Summen. Die möglicherweise nicht terminierende proportionale Division
+bleibt davon getrennt und weiterhin Eigentum der versionierten
+Last-Remainder-Gebührenregel.

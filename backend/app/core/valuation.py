@@ -80,6 +80,12 @@ def exact_decimal_sum(values: Sequence[Decimal]) -> Decimal:
         return sum(items, Decimal("0"))
 
 
+def exact_decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    """Subtract finite decimals without applying the ambient context."""
+
+    return exact_decimal_sum((left, right.copy_negate()))
+
+
 class PriceMethod(StrEnum):
     NATIVE_EUR = "native_eur"
     DAILY_AVERAGE_HOURLY = "daily_average_hourly"

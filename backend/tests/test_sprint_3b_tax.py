@@ -1,17 +1,18 @@
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Context, Decimal, getcontext, localcontext
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.tax import _dict_list
 from app.config.settings import get_settings
+from app.core.entities import AuditEvent
 from app.core.tax import (
     AcquisitionInput,
     DisposalCalculation,
@@ -27,10 +28,31 @@ from app.core.tax import (
     TaxJournalEntry,
     TaxRecordStatus,
     TaxReportingPeriod,
+    TaxReviewCase,
     TaxRuleVersion,
     TaxRunStatus,
     calculate_fifo,
     tax_snapshot_hash,
+)
+from app.core.transformation import (
+    AcquisitionLot,
+    AcquisitionType,
+    TaxTreatmentHint,
+    TransformationRun,
+    TransformationStatus,
+    ValuationMethod,
+    ValuationRequirement,
+    ValuationStatus,
+)
+from app.core.valuation import (
+    FeeTaxClassification,
+    FeeTaxReviewStatus,
+    PriceMethod,
+    ValuationDecision,
+    ValuationDecisionStatus,
+    ValuationRun,
+    ValuationRunStatus,
+    exact_decimal_sum,
 )
 from app.database.base import Base
 from app.database.session import get_session
@@ -43,6 +65,18 @@ from app.services.tax_exports import (
 )
 
 NOW = datetime(2026, 7, 30, 12, tzinfo=UTC)
+
+
+def assert_decimal_context_unchanged(before: Context) -> None:
+    current = getcontext()
+    assert current.prec == before.prec
+    assert current.rounding == before.rounding
+    assert current.Emin == before.Emin
+    assert current.Emax == before.Emax
+    assert current.capitals == before.capitals
+    assert current.clamp == before.clamp
+    assert dict(current.flags) == dict(before.flags)
+    assert dict(current.traps) == dict(before.traps)
 
 
 def acquisition(
@@ -93,6 +127,7 @@ def test_fifo_partial_multiple_lots_fees_and_stable_tie_break() -> None:
     second = acquisition("2", "300", NOW - timedelta(days=10), fee="3")
     third = acquisition("1", "200", NOW - timedelta(days=5))
     sold = disposal("2", "500", NOW, fee="5")
+    context_before = getcontext().copy()
 
     result = calculate_fifo(
         run_id=run_id,
@@ -102,6 +137,7 @@ def test_fifo_partial_multiple_lots_fees_and_stable_tie_break() -> None:
         disposals=[sold],
     )
 
+    assert_decimal_context_unchanged(context_before)
     assert [item.acquisition_lot_id for item in result.lots] == [
         first.acquisition_id,
         second.acquisition_id,
@@ -208,6 +244,44 @@ def test_staking_journal_never_treats_legacy_net_value_as_gross_income() -> None
     assert result.lots[0].acquisition_value_eur == Decimal("90")
     with pytest.raises((TypeError, ValueError)):
         disposal("1", "0", NOW)
+
+
+def test_tax_acquisition_arithmetic_preserves_long_reward_values_and_context() -> None:
+    gross = Decimal("51.586220962002859504121206557501435344829")
+    fee = Decimal("11.964719979423988667047664309258439466617")
+    net = Decimal("39.621500982578870837073542248242995878212")
+    context_before = getcontext().copy()
+
+    with localcontext() as unsafe_context:
+        unsafe_context.prec = getcontext().prec
+        assert net + fee != gross  # reproduces the unsafe default-context operation
+    assert_decimal_context_unchanged(context_before)
+    assert exact_decimal_sum((net, fee)) == gross
+    item = AcquisitionInput(
+        acquisition_id=uuid4(),
+        asset_code="KAVA",
+        quantity=Decimal("1.06809809"),
+        acquired_at=NOW,
+        value_eur=net,
+        fee_eur=Decimal("0"),
+        valuation_decision_id=uuid4(),
+        acquisition_type="staking_reward",
+        gross_income_eur=gross,
+        platform_fee_candidate_eur=fee,
+    )
+    result = calculate_fifo(
+        run_id=uuid4(),
+        period=TaxReportingPeriod.for_year(2026),
+        rules=TaxRuleVersion(),
+        acquisitions=[item],
+        disposals=[],
+    )
+
+    assert result.lots[0].acquisition_value_eur == net
+    assert result.lots[0].remaining_cost_eur == net
+    assert result.journal[0].eur_value == gross
+    assert result.journal[0].acquisition_cost_eur == net
+    assert_decimal_context_unchanged(context_before)
 
 
 def test_tax_records_validate_immutability_inputs() -> None:
@@ -394,6 +468,122 @@ def tax_client(tmp_path: Path) -> TestClient:
     app.dependency_overrides.clear()
 
 
+PRECISE_GROSS_TOTAL = Decimal("51.586220962002859504121206557501435344829")
+PRECISE_FEE_TOTAL = Decimal("11.964719979423988667047664309258439466617")
+PRECISE_NET_TOTAL = Decimal("39.621500982578870837073542248242995878212")
+
+
+def _precise_parts(total: Decimal, count: int) -> tuple[Decimal, ...]:
+    small = Decimal("0.000000000000000000000000000000000000001")
+    leading = (small,) * (count - 1)
+    return (
+        *leading,
+        exact_decimal_sum((total, *(item.copy_negate() for item in leading))),
+    )
+
+
+def _seed_precise_reward_decisions(database: Session) -> None:
+    net_values = _precise_parts(PRECISE_NET_TOTAL, 55)
+    fee_values = (*_precise_parts(PRECISE_FEE_TOTAL, 48), *(Decimal("0"),) * 7)
+    transformation = TransformationRun(
+        contract_version="kraken-domain-v2",
+        status=TransformationStatus.COMPLETED,
+        started_at=NOW,
+        completed_at=NOW,
+        actor_id="test-suite",
+        checked_records=55,
+        created_objects=55,
+    )
+    valuation_run = ValuationRun(
+        provider="manual",
+        correlation_id=uuid4(),
+        started_at=NOW,
+        ended_at=NOW,
+        status=ValuationRunStatus.COMPLETED,
+        checked_requirements=55,
+        resolved_requirements=55,
+        manual_count=55,
+    )
+    database.add_all((transformation, valuation_run))
+    values = zip(net_values, fee_values, strict=True)
+    for index, (net_value, fee_value) in enumerate(values):
+        gross_value = exact_decimal_sum((net_value, fee_value))
+        lot = AcquisitionLot(
+            stable_key=f"precise-tax-reward-{index}",
+            payload_hash=f"{index:064x}",
+            asset_raw_code="KAVA",
+            asset_code="KAVA",
+            asset_mapping_version="kraken-assets-v2",
+            quantity=net_value,
+            gross_quantity=gross_value,
+            fee_quantity=fee_value,
+            fee_asset="KAVA" if fee_value else None,
+            occurred_at=NOW - timedelta(minutes=index),
+            acquisition_type=AcquisitionType.STAKING_REWARD,
+            provider="kraken",
+            account_scope="default",
+            wallet_scope="kraken-spot",
+            external_id=f"precise-tax-reward-{index}",
+            transformation_version="kraken-domain-v2",
+            valuation_status=ValuationStatus.VALUATION_REQUIRED,
+            tax_treatment_hint=TaxTreatmentHint.PASSIVE_STAKING_REWARD,
+        )
+        requirement = ValuationRequirement(
+            asset_code="KAVA",
+            target_currency="EUR",
+            valuation_at=lot.occurred_at,
+            method=ValuationMethod.DAILY_AVERAGE,
+            status=ValuationStatus.VALUATION_REQUIRED,
+            reason_code="reward_inflow",
+            domain_object_type="AcquisitionLot",
+            domain_object_id=lot.id,
+            transformation_run_id=transformation.id,
+        )
+        has_fee = fee_value > 0
+        decision = ValuationDecision(
+            valuation_requirement_id=requirement.id,
+            valuation_run_id=valuation_run.id,
+            domain_object_type="AcquisitionLot",
+            domain_object_id=lot.id,
+            asset_code="KAVA",
+            quantity=net_value,
+            valuation_at=lot.occurred_at,
+            price_date=lot.occurred_at.date(),
+            method=PriceMethod.MANUAL_DAILY_PRICE,
+            unit_price_eur=Decimal("1"),
+            eur_value=net_value,
+            price_source="Synthetischer Präzisionstest",
+            provider="manual",
+            provider_object_id=None,
+            provider_contract_version="manual-v1",
+            method_version="eur-valuation-v2",
+            sample_count=1,
+            fetched_at=NOW,
+            decided_at=NOW,
+            status=ValuationDecisionStatus.RESOLVED,
+            reason_code="valuation_resolved",
+            gross_quantity=gross_value,
+            fee_quantity=fee_value,
+            net_quantity=net_value,
+            gross_income_eur=gross_value,
+            fee_value_eur=fee_value,
+            net_acquisition_value_eur=net_value,
+            valuation_basis="staking_reward_components_v2",
+            fee_tax_classification=(
+                FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+                if has_fee
+                else FeeTaxClassification.NOT_APPLICABLE
+            ),
+            fee_tax_review_status=(
+                FeeTaxReviewStatus.REVIEW_REQUIRED
+                if has_fee
+                else FeeTaxReviewStatus.NOT_REQUIRED
+            ),
+        )
+        database.add_all((lot, requirement, decision))
+    database.commit()
+
+
 def test_tax_api_empty_validation_and_openapi(tax_client: TestClient) -> None:
     for path in (
         "/api/tax-calculations",
@@ -448,6 +638,136 @@ def test_tax_api_empty_validation_and_openapi(tax_client: TestClient) -> None:
         "/api/exports/{item_id}/download",
     ):
         assert path in schema["paths"]
+
+
+def test_precise_reward_tax_run_is_exact_persistent_and_idempotent() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    with sessions() as database:
+        _seed_precise_reward_decisions(database)
+
+    def dependency() -> object:
+        with sessions() as database:
+            yield database
+
+    context_before = getcontext().copy()
+    app.dependency_overrides[get_session] = dependency
+    try:
+        with TestClient(app) as client:
+            created = client.post("/api/tax-calculations", json={"year": 2026})
+            assert created.status_code == 200
+            body = created.json()
+            assert body == {
+                "id": body["id"],
+                "status": "completed_with_review",
+                "checked": 103,
+                "allocations": 0,
+                "journal_entries": 103,
+                "reviews": 48,
+                "duplicate": False,
+            }
+            repeated = client.post("/api/tax-calculations", json={"year": 2026})
+            assert repeated.status_code == 200
+            assert repeated.json()["id"] == body["id"]
+            assert repeated.json()["duplicate"] is True
+            summary = client.get("/api/tax-summary?year=2026")
+            assert summary.status_code == 200
+            summary_body = summary.json()
+    finally:
+        app.dependency_overrides.clear()
+
+    assert_decimal_context_unchanged(context_before)
+    assert Decimal(summary_body["gross_staking_income"]) == PRECISE_GROSS_TOTAL
+    assert Decimal(summary_body["staking_fee_candidates"]) == PRECISE_FEE_TOTAL
+    assert Decimal(summary_body["provisional_net_staking_income"]) == (
+        PRECISE_NET_TOTAL
+    )
+    assert (
+        exact_decimal_sum((PRECISE_NET_TOTAL, PRECISE_FEE_TOTAL)) == PRECISE_GROSS_TOTAL
+    )
+    assert summary_body["earn_inflows"] == 55
+    assert summary_body["open_reviews"] == 48
+    assert summary_body["disposals"] == 0
+    assert summary_body["incomplete_disposals"] == 0
+    assert Decimal(summary_body["inventory"]["KAVA"]) == PRECISE_NET_TOTAL
+
+    with sessions() as database:
+        assert database.scalar(select(func.count()).select_from(TaxCalculationRun)) == 1
+        assert database.scalar(select(func.count()).select_from(InventoryLot)) == 55
+        assert database.scalar(select(func.count()).select_from(LotAllocation)) == 0
+        assert database.scalar(select(func.count()).select_from(TaxJournalEntry)) == 103
+        assert database.scalar(select(func.count()).select_from(TaxReviewCase)) == 48
+        lots = tuple(database.scalars(select(InventoryLot)))
+        journal = tuple(database.scalars(select(TaxJournalEntry)))
+        reviews = tuple(database.scalars(select(TaxReviewCase)))
+        assert all(item.original_quantity == item.remaining_quantity for item in lots)
+        assert all(
+            item.acquisition_value_eur == item.remaining_cost_eur for item in lots
+        )
+        assert exact_decimal_sum(tuple(item.remaining_cost_eur for item in lots)) == (
+            PRECISE_NET_TOTAL
+        )
+        assert (
+            sum(item.entry_type is JournalEntryType.EARN_INFLOW for item in journal)
+            == 55
+        )
+        assert sum(item.entry_type is JournalEntryType.REVIEW for item in journal) == 48
+        assert sum(item.status is TaxRecordStatus.RESOLVED for item in journal) == 55
+        assert (
+            sum(item.status is TaxRecordStatus.REVIEW_REQUIRED for item in journal)
+            == 48
+        )
+        assert {item.code for item in reviews} == {
+            "tax_staking_platform_fee_candidate_review"
+        }
+
+
+def test_tax_workflow_rolls_back_all_records_after_unexpected_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    with sessions() as database:
+        _seed_precise_reward_decisions(database)
+
+    def dependency() -> object:
+        with sessions() as database:
+            yield database
+
+    def fail_fifo(**_arguments: object) -> object:
+        raise RuntimeError("synthetic tax workflow failure")
+
+    monkeypatch.setattr("app.api.tax.calculate_fifo", fail_fifo)
+    app.dependency_overrides[get_session] = dependency
+    try:
+        with (
+            TestClient(app) as client,
+            pytest.raises(RuntimeError, match="synthetic tax workflow failure"),
+        ):
+            client.post("/api/tax-calculations", json={"year": 2026})
+    finally:
+        app.dependency_overrides.clear()
+
+    with sessions() as database:
+        for model in (
+            TaxCalculationRun,
+            InventoryLot,
+            LotAllocation,
+            TaxJournalEntry,
+            TaxReviewCase,
+            AuditEvent,
+        ):
+            assert database.scalar(select(func.count()).select_from(model)) == 0
 
 
 def test_tax_api_fifo_journal_exports_and_idempotency(tax_client: TestClient) -> None:

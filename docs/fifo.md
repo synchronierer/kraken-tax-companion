@@ -21,10 +21,31 @@ ihrer technischen UUID sortiert. Die Engine entnimmt das älteste verfügbare
 Los zuerst, unterstützt Teilentnahmen und verteilt eine Veräußerung über
 mehrere Lose. Mengen und Geldwerte bleiben vollständig `Decimal`.
 
+Endliche Dezimaloperationen (Addition, Subtraktion, Multiplikation und
+Summierung) verwenden einen lokalen, aus Koeffizienten und Exponenten der
+Operanden abgeleiteten Präzisionskontext. Damit bleibt beispielsweise die
+Addition einer Erwerbsgebühr von null zum langen Netto-Anschaffungswert
+verlustfrei. Der globale Decimal-Kontext wird weder gelesen noch verändert;
+eine Cent- oder Anzeigequantisierung findet im Rechenkern nicht statt.
+
 Der Anschaffungswert zuzüglich Erwerbsgebühr bildet die Kostenbasis. Bei einer
 Teilmenge werden Kosten, Erlös und Veräußerungsgebühr proportional zugeordnet.
 Der jeweils letzte Teil erhält die nicht vorab gerundete Restdifferenz. Dadurch
 entsprechen die Summen exakt den Ausgangswerten.
+
+Die proportionale Division kann im Gegensatz zu endlichen Operationen ein
+nicht endendes Dezimalergebnis erzeugen. Ihr bestehender Vertrag
+`proportional-last-remainder-v1` wird durch die Präzisionskorrektur nicht
+umdefiniert: Die letzte Zuordnung erhält weiterhin den Rest. Vor dem ersten
+realen Lauf mit Veräußerungen ist die bislang implizite Divisionspräzision als
+eigene Regelentscheidung (Skala, Rundungsmodus und Restzuweisung) zu prüfen.
+Die bestehende Division läuft bis dahin in einer lokalen Kopie des aktiven
+Kontexts, sodass sie dessen bisherigen Zahlenvertrag wahrt, aber weder globale
+Flags noch globale Präzision verändert.
+Da Sprint-3B-Erwerbsläufe ohne Veräußerungen keine proportionale Division
+ausführen, blockiert diese offene Regelentscheidung deren exakte Erfassung
+nicht. Die Gebührenregelversion bleibt bis zu einer solchen fachlich
+entschiedenen Änderung unverändert.
 
 ## Reviews und Versionierung
 

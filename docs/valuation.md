@@ -130,7 +130,10 @@ strikte Invariante `Brutto = Netto + Gebühr` verstoßen. Der Core verwendet
 deshalb ausschließlich lokale `decimal.localcontext()`-Blöcke. Die benötigte
 Multiplikationspräzision folgt aus der Summe der Koeffizientenziffern; für
 Summen werden die Operanden auf den kleinsten Exponenten ausgerichtet und um
-die maximal mögliche Übertragsbreite ergänzt.
+die maximal mögliche Übertragsbreite ergänzt. Subtraktionen verwenden eine
+kontextfreie Vorzeichenkopie und anschließend dieselbe exakte Summenfunktion;
+damit kann auch das Negieren eines langpräzisen Operanden keine Stelle
+verlieren.
 
 Es gibt weder Floats noch Toleranzvergleich, fachliche Quantisierung oder
 Cent-Rundung. Mengen-, Komponenten- und aggregierte Run-Invarianten bleiben

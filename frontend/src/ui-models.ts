@@ -30,27 +30,65 @@ export function formatAssetQuantity(value: string): string {
   return quantityFormatter.format(Number(value));
 }
 
+type ExactDecimal = { coefficient: bigint; decimalExponent: bigint };
+
+function parseExactDecimal(value: string): ExactDecimal {
+  const match = /^(?<sign>-?)(?<integer>\d+)(?:\.(?<fraction>\d+))?(?:[eE](?<exponent>[+-]?\d+))?$/.exec(value);
+  if (!match?.groups) throw new Error("Ungültiger Decimal-String.");
+  const fraction = match.groups.fraction ?? "";
+  const explicitExponent = BigInt(match.groups.exponent ?? "0");
+  const unsignedCoefficient = BigInt(`${match.groups.integer}${fraction}`);
+  return {
+    coefficient: match.groups.sign === "-" ? -unsignedCoefficient : unsignedCoefficient,
+    decimalExponent: explicitExponent - BigInt(fraction.length),
+  };
+}
+
+function decimalZeros(count: bigint): string {
+  let result = "";
+  for (let remaining = count; remaining > 0n; remaining -= 1n) result += "0";
+  return result;
+}
+
+function plainDecimal(coefficient: bigint, decimalExponent: bigint): string {
+  if (coefficient === 0n) return "0";
+  let normalized = coefficient;
+  let exponent = decimalExponent;
+  while (normalized % 10n === 0n) {
+    normalized /= 10n;
+    exponent += 1n;
+  }
+  const negative = normalized < 0n;
+  const digits = (negative ? -normalized : normalized).toString();
+  const sign = negative ? "-" : "";
+  if (exponent >= 0n) return `${sign}${digits}${decimalZeros(exponent)}`;
+  const scale = -exponent;
+  if (scale >= BigInt(digits.length)) {
+    return `${sign}0.${decimalZeros(scale - BigInt(digits.length))}${digits}`;
+  }
+  let integer = "";
+  let fraction = "";
+  let remaining = BigInt(digits.length);
+  for (const digit of digits) {
+    if (remaining > scale) integer += digit;
+    else fraction += digit;
+    remaining -= 1n;
+  }
+  return `${sign}${integer}.${fraction}`;
+}
+
 export function sumDecimalStrings(values: string[]): string {
-  const parsed = values.map((value) => {
-    const match = /^(?<sign>-?)(?<integer>\d+)(?:\.(?<fraction>\d+))?$/.exec(value);
-    if (!match?.groups) throw new Error("Ungültiger Decimal-String.");
-    return {
-      negative: match.groups.sign === "-",
-      integer: match.groups.integer,
-      fraction: match.groups.fraction ?? "",
-    };
-  });
-  const scale = Math.max(0, ...parsed.map((value) => value.fraction.length));
-  const total = parsed.reduce((result, value) => {
-    const digits = `${value.integer}${value.fraction.padEnd(scale, "0")}`;
-    return result + BigInt(`${value.negative ? "-" : ""}${digits}`);
-  }, 0n);
-  const negative = total < 0n;
-  const absolute = (negative ? -total : total).toString().padStart(scale + 1, "0");
-  if (scale === 0) return `${negative ? "-" : ""}${absolute}`;
-  const integer = absolute.slice(0, -scale);
-  const fraction = absolute.slice(-scale).replace(/0+$/, "");
-  return `${negative ? "-" : ""}${integer}${fraction ? `.${fraction}` : ""}`;
+  if (values.length === 0) return "0";
+  const parsed = values.map(parseExactDecimal);
+  const commonExponent = parsed.reduce(
+    (smallest, value) => value.decimalExponent < smallest ? value.decimalExponent : smallest,
+    parsed[0].decimalExponent,
+  );
+  const total = parsed.reduce(
+    (result, value) => result + value.coefficient * 10n ** (value.decimalExponent - commonExponent),
+    0n,
+  );
+  return plainDecimal(total, commonExponent);
 }
 
 export function reviewDecisionLabel(decision: string): string {

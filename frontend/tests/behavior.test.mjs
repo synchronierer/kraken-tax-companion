@@ -117,6 +117,17 @@ test("presentation rules cover empty state, validation, reviews and secrets", as
   assert.equal(model.formatEurDecimal("0.0140694201443203559150371395821465577"), "0,01 €");
   assert.equal(model.formatAssetQuantity("0.3560326900"), "0,35603269");
   assert.equal(model.formatAssetQuantity("0.1280751569"), "0,12807516");
+  assert.equal(model.sumDecimalStrings([]), "0");
+  assert.equal(model.sumDecimalStrings(["1", "2"]), "3");
+  assert.equal(model.sumDecimalStrings(["0.1", "0.2"]), "0.3");
+  assert.equal(
+    model.sumDecimalStrings(["1E-20", "2E-20"]),
+    "0.00000000000000000003",
+  );
+  assert.equal(model.sumDecimalStrings(["1.23E-7", "0.000000077"]), "0.0000002");
+  assert.equal(model.sumDecimalStrings(["2.5E+3", "500"]), "3000");
+  assert.equal(model.sumDecimalStrings(["-2.5E-3", "0.003"]), "0.0005");
+  assert.equal(model.sumDecimalStrings(["0E-39", "1.25"]), "1.25");
   assert.equal(
     model.sumDecimalStrings([
       "11.900000000000000000000000000000000000001",
@@ -124,6 +135,16 @@ test("presentation rules cover empty state, validation, reviews and secrets", as
     ]),
     "11.964719979423988667047664309258439466617",
   );
+  assert.equal(
+    model.sumDecimalStrings([
+      "1E-20", "1.23e-7", "0.0140694201443203559150371395821465577",
+      "2.5E+3", "-2.5e-3", "0E-39",
+    ]),
+    "2500.0115695431443203559250371395821465577",
+  );
+  for (const invalid of ["NaN", "Infinity", "", "1,25", "abc"]) {
+    assert.throws(() => model.sumDecimalStrings([invalid]), /Ungültiger Decimal-String/);
+  }
   assert.equal(
     model.reviewDecisionLabel("include_as_werbungskosten"),
     "als Werbungskosten berücksichtigen",

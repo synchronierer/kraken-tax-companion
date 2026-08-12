@@ -1,5 +1,10 @@
 # Sprint 3B – Zwischenstand
 
+Sprint 3C baut auf diesem Stand auf und ergänzt persistenzseitig immutable,
+versionierte Nutzerentscheidungen für Staking-Plattformgebühren. Bestehende Kandidaten,
+Reviews und Taxläufe bleiben unverändert; Migration 0009 legt ausschließlich
+die neue Struktur an.
+
 Sprint 3B erweitert den abgeschlossenen EUR-Bewertungsworkflow um die
 providerneutrale FIFO-Engine, ein referenzbasiertes Steuerjournal,
 Jahreszusammenfassungen sowie CSV- und PDF-Arbeitsdokumente.

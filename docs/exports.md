@@ -1,5 +1,13 @@
 # Steuerliche Exporte
 
+Der Prüffall-CSV-Export enthält ab Format
+`tax-export-review-decisions-v3` neben dem historischen `TaxReviewCase` die
+Bewertungs-ID, den Gebührenwert, offen/entschieden, die effektive Entscheidung,
+Begründung, Akteur, Zeitpunkt, Version und Batch-ID. Jahres-CSV und PDF trennen
+Kandidaten, manuell berücksichtigt, manuell nicht berücksichtigt und offen.
+Der geprüfte Netto-Arbeitswert ist eine dokumentierte Nutzerentscheidung und
+keine steuerrechtliche Automatik.
+
 Sprint 3B erzeugt semikolongetrennte UTF-8-CSV-Dateien für Steuerjournal,
 FIFO-Zuordnungen, Bestände, Bewertungsnachweise, Reviewfälle und
 Jahreszusammenfassung. Spaltenreihenfolge und Sortierung sind stabil;

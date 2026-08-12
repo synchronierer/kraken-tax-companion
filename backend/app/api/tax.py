@@ -3,7 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -36,9 +36,12 @@ from app.core.tax import (
     TaxRecordStatus,
     TaxReportingPeriod,
     TaxReviewCase,
+    TaxReviewDecision,
+    TaxReviewDecisionValue,
     TaxRuleVersion,
     TaxRunStatus,
     calculate_fifo,
+    effective_tax_review_decisions,
     tax_snapshot_hash,
 )
 from app.core.time import utc_now
@@ -193,6 +196,7 @@ class JournalItem(BaseModel):
     status: str
     source_object_type: str
     source_object_id: str
+    tax_review_decision_id: str | None = None
 
 
 class JournalPage(BaseModel):
@@ -243,10 +247,58 @@ class TaxSummaryResponse(BaseModel):
     gross_staking_income: str
     staking_fee_candidates: str
     provisional_net_staking_income: str
+    staking_fee_included: str
+    staking_fee_excluded: str
+    staking_fee_open: str
+    reviewed_net_staking_income: str
     open_valuations: int
     open_reviews: int
     incomplete_disposals: int
     inventory: dict[str, str]
+
+
+class TaxReviewDecisionInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    tax_review_case_id: UUID
+    decision: TaxReviewDecisionValue
+    reason: str = Field(min_length=1, max_length=1024)
+
+
+class TaxReviewDecisionBulkInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    tax_review_case_ids: list[UUID] = Field(min_length=1, max_length=200)
+    decision: TaxReviewDecisionValue
+    reason: str = Field(min_length=1, max_length=1024)
+
+
+class TaxReviewDecisionResponse(BaseModel):
+    id: UUID
+    valuation_decision_id: UUID
+    tax_review_case_id: UUID
+    decision: TaxReviewDecisionValue
+    reason: str
+    actor_id: str
+    decided_at: datetime
+    version: int
+    supersedes_id: UUID | None
+    batch_id: UUID
+
+
+class TaxReviewDecisionBulkResponse(BaseModel):
+    batch_id: UUID
+    created_count: int
+    superseded_count: int
+    decision: TaxReviewDecisionValue
+
+
+class TaxFeeReviewPage(BaseModel):
+    items: list[dict[str, Any]]
+    total: int
+    offset: int
+    limit: int
+    summary: dict[str, int | str]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -374,6 +426,284 @@ def _latest_decisions(db: Session) -> dict[UUID, ValuationDecision]:
     }
 
 
+def _effective_review_decisions(db: Session) -> dict[UUID, TaxReviewDecision]:
+    try:
+        return effective_tax_review_decisions(_list(db, TaxReviewDecision))
+    except ValueError as error:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "tax_review_decision_history_inconsistent",
+                "message": "Die Historie der Reviewentscheidungen ist inkonsistent.",
+            },
+        ) from error
+
+
+def _review_decision_row(item: TaxReviewDecision) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "valuation_decision_id": item.valuation_decision_id,
+        "tax_review_case_id": item.source_tax_review_case_id,
+        "decision": item.decision,
+        "reason": item.reason,
+        "actor_id": item.actor_id,
+        "decided_at": item.decided_at,
+        "version": item.version,
+        "supersedes_id": item.supersedes_id,
+        "batch_id": item.batch_id,
+    }
+
+
+def _validate_fee_review_case(
+    db: Session, case_id: UUID, current: dict[UUID, ValuationDecision]
+) -> tuple[TaxReviewCase, ValuationDecision]:
+    case = db.get(TaxReviewCase, case_id)
+    if case is None:
+        raise _not_found("tax_review_case_not_found")
+    if (
+        case.code != "tax_staking_platform_fee_candidate_review"
+        or case.source_object_type != "ValuationDecision"
+    ):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "tax_review_case_not_decidable_as_staking_fee",
+                "message": "Dieser Prüffall ist keine Staking-Plattformgebühr.",
+            },
+        )
+    decision = db.get(ValuationDecision, case.source_object_id)
+    if decision is None:
+        raise _not_found("valuation_decision_not_found")
+    current_decision = current.get(decision.domain_object_id)
+    if current_decision is None or current_decision.id != decision.id:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "tax_review_valuation_superseded",
+                "message": "Die zugehörige Bewertung ist nicht mehr aktuell.",
+            },
+        )
+    if (
+        decision.fee_tax_classification
+        is not FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+        or decision.fee_tax_review_status is not FeeTaxReviewStatus.REVIEW_REQUIRED
+        or decision.fee_value_eur is None
+        or decision.fee_value_eur <= 0
+    ):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "tax_review_valuation_not_fee_candidate",
+                "message": "Die Bewertung enthält keinen offenen Gebührenkandidaten.",
+            },
+        )
+    return case, decision
+
+
+def _create_review_decisions(
+    db: Session,
+    *,
+    case_ids: list[UUID],
+    decision_value: TaxReviewDecisionValue,
+    reason: str,
+) -> tuple[UUID, list[TaxReviewDecision], int]:
+    if len(set(case_ids)) != len(case_ids):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "tax_review_duplicate_case_ids",
+                "message": "Ein Prüffall darf im Batch nur einmal vorkommen.",
+            },
+        )
+    current_valuations = _latest_decisions(db)
+    validated = [
+        _validate_fee_review_case(db, case_id, current_valuations)
+        for case_id in case_ids
+    ]
+    valuation_ids = [valuation.id for _, valuation in validated]
+    if len(set(valuation_ids)) != len(valuation_ids):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "tax_review_duplicate_valuation_ids",
+                "message": "Eine Bewertung darf im Batch nur einmal vorkommen.",
+            },
+        )
+    effective = _effective_review_decisions(db)
+    batch_id = uuid4()
+    now = utc_now()
+    created: list[TaxReviewDecision] = []
+    superseded_count = 0
+    for case, valuation in validated:
+        previous = effective.get(valuation.id)
+        if previous is not None:
+            superseded_count += 1
+        item = TaxReviewDecision(
+            valuation_decision_id=valuation.id,
+            source_tax_review_case_id=case.id,
+            decision=decision_value,
+            reason=reason,
+            actor_id="local-user",
+            decided_at=now,
+            version=(previous.version + 1 if previous else 1),
+            supersedes_id=(previous.id if previous else None),
+            batch_id=batch_id,
+        )
+        created.append(item)
+    db.add_all(created)
+    for item in created:
+        db.add(
+            AuditEvent(
+                occurred_at=now,
+                event_type="tax.review_decision_created",
+                entity_type="TaxReviewDecision",
+                entity_id=item.id,
+                actor_type=AuditActorType.USER,
+                actor_id="local-user",
+                metadata={
+                    "valuation_decision_id": str(item.valuation_decision_id),
+                    "tax_review_case_id": str(item.source_tax_review_case_id),
+                    "decision": item.decision.value,
+                    "version": item.version,
+                    "batch_id": str(item.batch_id),
+                    "supersedes_id": (
+                        str(item.supersedes_id) if item.supersedes_id else None
+                    ),
+                },
+            )
+        )
+    db.commit()
+    return batch_id, created, superseded_count
+
+
+@router.post("/tax-review-decisions", response_model=TaxReviewDecisionResponse)
+def create_tax_review_decision(data: TaxReviewDecisionInput, db: Db) -> dict[str, Any]:
+    _, created, _ = _create_review_decisions(
+        db,
+        case_ids=[data.tax_review_case_id],
+        decision_value=data.decision,
+        reason=data.reason,
+    )
+    return _review_decision_row(created[0])
+
+
+@router.post("/tax-review-decisions/bulk", response_model=TaxReviewDecisionBulkResponse)
+def create_tax_review_decisions_bulk(
+    data: TaxReviewDecisionBulkInput, db: Db
+) -> dict[str, Any]:
+    batch_id, created, superseded_count = _create_review_decisions(
+        db,
+        case_ids=data.tax_review_case_ids,
+        decision_value=data.decision,
+        reason=data.reason,
+    )
+    return {
+        "batch_id": batch_id,
+        "created_count": len(created),
+        "superseded_count": superseded_count,
+        "decision": data.decision,
+    }
+
+
+@router.get("/tax-review-decisions", response_model=TaxFeeReviewPage)
+def tax_review_decision_list(
+    db: Db,
+    offset: Offset = 0,
+    limit: Limit = 100,
+    year: int | None = Query(default=None, ge=1970, le=9999),
+    status: Literal["open", "resolved", "all"] = "all",
+    asset: str | None = None,
+    decision: TaxReviewDecisionValue | None = None,
+) -> dict[str, Any]:
+    effective = _effective_review_decisions(db)
+    history_by_valuation: dict[UUID, list[TaxReviewDecision]] = {}
+    for item in _list(db, TaxReviewDecision):
+        history_by_valuation.setdefault(item.valuation_decision_id, []).append(item)
+    rows: list[dict[str, Any]] = []
+    seen_valuations: set[UUID] = set()
+    for case in sorted(
+        _list(db, TaxReviewCase), key=lambda item: (item.occurred_at, item.id.hex)
+    ):
+        if (
+            case.code != "tax_staking_platform_fee_candidate_review"
+            or case.source_object_type != "ValuationDecision"
+            or case.source_object_id in seen_valuations
+        ):
+            continue
+        valuation = db.get(ValuationDecision, case.source_object_id)
+        if valuation is None or valuation.fee_value_eur is None:
+            continue
+        seen_valuations.add(valuation.id)
+        current = effective.get(valuation.id)
+        state = "resolved" if current else "open"
+        if year is not None and valuation.price_date.year != year:
+            continue
+        if status != "all" and status != state:
+            continue
+        if asset is not None and valuation.asset_code != asset.upper():
+            continue
+        if decision is not None and (
+            current is None or current.decision is not decision
+        ):
+            continue
+        history = sorted(
+            history_by_valuation.get(valuation.id, []), key=lambda item: item.version
+        )
+        rows.append(
+            {
+                "tax_review_case_id": str(case.id),
+                "valuation_decision_id": str(valuation.id),
+                "asset": valuation.asset_code,
+                "date": valuation.price_date,
+                "fee_quantity": str(valuation.fee_quantity or Decimal("0")),
+                "fee_value_eur": str(valuation.fee_value_eur),
+                "status": state,
+                "decision": current.decision.value if current else None,
+                "reason": current.reason if current else None,
+                "actor_id": current.actor_id if current else None,
+                "decided_at": current.decided_at if current else None,
+                "version": current.version if current else None,
+                "batch_id": str(current.batch_id) if current else None,
+                "history": [_review_decision_row(item) for item in history],
+            }
+        )
+    page = _page(rows, offset, limit)
+    page["summary"] = {
+        "open_count": sum(row["status"] == "open" for row in rows),
+        "decided_count": sum(row["status"] == "resolved" for row in rows),
+        "open_total_eur": str(
+            exact_decimal_sum(
+                tuple(
+                    Decimal(str(row["fee_value_eur"]))
+                    for row in rows
+                    if row["status"] == "open"
+                )
+            )
+        ),
+        "included_total_eur": str(
+            exact_decimal_sum(
+                tuple(
+                    Decimal(str(row["fee_value_eur"]))
+                    for row in rows
+                    if row["decision"]
+                    == TaxReviewDecisionValue.INCLUDE_AS_WERBUNGSKOSTEN.value
+                )
+            )
+        ),
+        "excluded_total_eur": str(
+            exact_decimal_sum(
+                tuple(
+                    Decimal(str(row["fee_value_eur"]))
+                    for row in rows
+                    if row["decision"]
+                    == TaxReviewDecisionValue.EXCLUDE_FROM_WERBUNGSKOSTEN.value
+                )
+            )
+        ),
+    }
+    return page
+
+
 def _fee_values(
     db: Session, decisions: dict[UUID, ValuationDecision]
 ) -> dict[UUID, Decimal]:
@@ -391,6 +721,7 @@ def _tax_inputs(
     db: Session, period: TaxReportingPeriod
 ) -> tuple[list[AcquisitionInput], list[DisposalInput], list[PendingTaxReview]]:
     decisions = _latest_decisions(db)
+    review_decisions = _effective_review_decisions(db)
     fee_values = _fee_values(db, decisions)
     trades_by_external = {
         trade.external_id: trade for trade in _list(db, TradeExecution)
@@ -434,7 +765,11 @@ def _tax_inputs(
                     ),
                 )
             )
-        if decision.fee_tax_review_status is FeeTaxReviewStatus.REVIEW_REQUIRED:
+        effective_review = review_decisions.get(decision.id)
+        if (
+            decision.fee_tax_review_status is FeeTaxReviewStatus.REVIEW_REQUIRED
+            and effective_review is None
+        ):
             missing.append(
                 PendingTaxReview(
                     source_type="ValuationDecision",
@@ -461,6 +796,15 @@ def _tax_inputs(
                 acquisition_type=item.acquisition_type.value,
                 gross_income_eur=decision.gross_income_eur,
                 platform_fee_candidate_eur=(decision.fee_value_eur or Decimal("0")),
+                platform_fee_decision=(
+                    effective_review.decision if effective_review else None
+                ),
+                tax_review_decision_id=(
+                    effective_review.id if effective_review else None
+                ),
+                tax_review_decision_version=(
+                    effective_review.version if effective_review else None
+                ),
             )
         )
     for item in _list(db, DisposalEvent):
@@ -969,6 +1313,11 @@ def journal_list(
             "status": item.status.value,
             "source_object_type": item.source_object_type,
             "source_object_id": str(item.source_object_id),
+            "tax_review_decision_id": (
+                str(item.tax_review_decision_id)
+                if item.tax_review_decision_id
+                else None
+            ),
         }
         for item in _list(db, TaxJournalEntry)
         if run
@@ -1015,6 +1364,9 @@ def journal_detail(item_id: UUID, db: Db) -> dict[str, Any]:
         "status": item.status.value,
         "source_object_type": item.source_object_type,
         "source_object_id": str(item.source_object_id),
+        "tax_review_decision_id": (
+            str(item.tax_review_decision_id) if item.tax_review_decision_id else None
+        ),
     }
     row["provenance"] = _provenance_chain(
         db,
@@ -1085,6 +1437,30 @@ def tax_summary(db: Db, year: int = Query(ge=1970, le=9999)) -> dict[str, Any]:
             is FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
         )
     )
+    effective_reviews = _effective_review_decisions(db)
+    included_values: list[Decimal] = []
+    excluded_values: list[Decimal] = []
+    open_values: list[Decimal] = []
+    for item in current_decisions:
+        if (
+            item.price_date.year != year
+            or item.fee_value_eur is None
+            or item.fee_tax_classification
+            is not FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+        ):
+            continue
+        review_decision = effective_reviews.get(item.id)
+        if review_decision is None:
+            open_values.append(item.fee_value_eur)
+        elif (
+            review_decision.decision is TaxReviewDecisionValue.INCLUDE_AS_WERBUNGSKOSTEN
+        ):
+            included_values.append(item.fee_value_eur)
+        else:
+            excluded_values.append(item.fee_value_eur)
+    staking_fee_included = exact_decimal_sum(included_values)
+    staking_fee_excluded = exact_decimal_sum(excluded_values)
+    staking_fee_open = exact_decimal_sum(open_values)
     inventory: dict[str, Decimal] = {}
     for lot in lots:
         inventory[lot.asset_code] = exact_decimal_sum(
@@ -1117,6 +1493,12 @@ def tax_summary(db: Db, year: int = Query(ge=1970, le=9999)) -> dict[str, Any]:
         "provisional_net_staking_income": str(
             exact_decimal_subtract(gross_staking_income, staking_fee_candidates)
         ),
+        "staking_fee_included": str(staking_fee_included),
+        "staking_fee_excluded": str(staking_fee_excluded),
+        "staking_fee_open": str(staking_fee_open),
+        "reviewed_net_staking_income": str(
+            exact_decimal_subtract(gross_staking_income, staking_fee_included)
+        ),
         "open_valuations": open_valuations,
         "open_reviews": run.review_count if run else 0,
         "incomplete_disposals": sum(
@@ -1143,6 +1525,7 @@ EXPORT_COLUMNS: dict[ExportKind, tuple[str, ...]] = {
         "rule_version",
         "status",
         "source_object_id",
+        "tax_review_decision_id",
     ),
     ExportKind.FIFO_ALLOCATIONS_CSV: (
         "id",
@@ -1201,6 +1584,15 @@ EXPORT_COLUMNS: dict[ExportKind, tuple[str, ...]] = {
         "source_object_type",
         "source_object_id",
         "occurred_at",
+        "valuation_decision_id",
+        "fee_value_eur",
+        "review_status",
+        "decision",
+        "reason",
+        "actor_id",
+        "decided_at",
+        "version",
+        "batch_id",
     ),
     ExportKind.ANNUAL_SUMMARY_CSV: (
         "year",
@@ -1214,6 +1606,10 @@ EXPORT_COLUMNS: dict[ExportKind, tuple[str, ...]] = {
         "gross_staking_income",
         "staking_fee_candidates",
         "provisional_net_staking_income",
+        "staking_fee_included",
+        "staking_fee_excluded",
+        "staking_fee_open",
+        "reviewed_net_staking_income",
         "open_valuations",
         "open_reviews",
         "incomplete_disposals",
@@ -1359,17 +1755,45 @@ def _export_rows(
         rows.sort(key=lambda row: (str(row["date"]), str(row["id"])))
         return _dict_list(rows)
     if kind == ExportKind.REVIEWS_CSV:
+        effective = _effective_review_decisions(db)
+        cases_by_valuation: dict[UUID, TaxReviewCase] = {}
+        for case in _list(db, TaxReviewCase):
+            if (
+                case.code == "tax_staking_platform_fee_candidate_review"
+                and case.source_object_type == "ValuationDecision"
+            ):
+                previous_case = cases_by_valuation.get(case.source_object_id)
+                if previous_case is None or (case.occurred_at, case.id.hex) > (
+                    previous_case.occurred_at,
+                    previous_case.id.hex,
+                ):
+                    cases_by_valuation[case.source_object_id] = case
         rows = [
             {
-                "id": str(item.id),
-                "code": item.code,
-                "message": item.message,
-                "source_object_type": item.source_object_type,
-                "source_object_id": str(item.source_object_id),
-                "occurred_at": item.occurred_at,
+                "id": str(case.id) if case else None,
+                "code": (
+                    case.code if case else "tax_staking_platform_fee_candidate_review"
+                ),
+                "message": case.message if case else None,
+                "source_object_type": "ValuationDecision",
+                "source_object_id": str(valuation.id),
+                "occurred_at": valuation.valuation_at,
+                "valuation_decision_id": str(valuation.id),
+                "fee_value_eur": valuation.fee_value_eur,
+                "review_status": "resolved" if current else "open",
+                "decision": current.decision.value if current else None,
+                "reason": current.reason if current else None,
+                "actor_id": current.actor_id if current else None,
+                "decided_at": current.decided_at if current else None,
+                "version": current.version if current else None,
+                "batch_id": current.batch_id if current else None,
             }
-            for item in _list(db, TaxReviewCase)
-            if item.tax_calculation_run_id == run.id
+            for valuation in _latest_decisions(db).values()
+            if run.period_start <= valuation.price_date <= run.period_end
+            and valuation.fee_tax_classification
+            is FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+            for case in [cases_by_valuation.get(valuation.id)]
+            for current in [effective.get(valuation.id)]
         ]
         rows.sort(key=lambda row: (str(row["occurred_at"]), str(row["id"])))
         return _dict_list(rows)

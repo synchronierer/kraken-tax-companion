@@ -40,3 +40,26 @@ Aktionen aufgelöst; direkte Datenbankänderungen sind kein zulässiger Weg.
 Diese Änderung ist durch `private-assets-reward-fee-review-v2`,
 `tax-journal-reward-gross-v2` und `tax-export-reward-components-v2`
 versioniert. Frühere Rechenläufe behalten ihre gespeicherten v1-Regelstände.
+
+## Revisionssichere Entscheidung über Gebührenkandidaten
+
+Ein Kandidat ist keine automatisch anerkannte Werbungskostenposition. Der
+Benutzer kann ihn ausdrücklich berücksichtigen oder nicht berücksichtigen und
+muss eine Begründung angeben. Offenlassen erzeugt keinen Datensatz. Jede
+Entscheidung ist als persistierter Datensatz immutable: Der SQLAlchemy-
+`before_update`-/`reject_update`-Schutz verhindert Mutation. Änderungen
+erzeugen ausschließlich eine neue Version mit Verweis auf die vorige.
+Sammelentscheidungen bestehen aus einzelnen revisionsfähigen Entscheidungen
+mit gemeinsamer `batch_id`.
+
+`INCLUDE_AS_WERBUNGSKOSTEN` erzeugt im nächsten, bewusst gestarteten Taxlauf
+zusätzlich zum Brutto-`EARN_INFLOW` einen aufgelösten `FEE`-Journaleintrag.
+`EXCLUDE_FROM_WERBUNGSKOSTEN` erzeugt weder Gebühren- noch Reviewzeile. Ohne
+Entscheidung bleibt die Reviewzeile bestehen. Nettobestand und
+Anschaffungskosten werden in allen Fällen nicht verändert.
+
+Die neuen Regeln heißen `private-assets-reward-fee-decision-v3`,
+`tax-journal-reward-fee-decision-v3` und
+`tax-export-review-decisions-v3`. `reviewed_net_staking_income` ist eine
+Arbeitsberechnung aus Bruttoertrag minus manuell berücksichtigten Kandidaten,
+keine automatische steuerrechtliche Feststellung.

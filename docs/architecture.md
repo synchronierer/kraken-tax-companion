@@ -323,3 +323,26 @@ Journalwerte, FIFO-Akkumulatoren sowie Gewinn-, Verlust-, Bestands- und
 Reward-Summen. Die möglicherweise nicht terminierende proportionale Division
 bleibt davon getrennt und weiterhin Eigentum der versionierten
 Last-Remainder-Gebührenregel.
+
+## Manuelle Steuer-Reviewentscheidungen
+
+Sprint 3C trennt den unveränderlichen Gebührenkandidaten der Bewertung von der
+ebenfalls unveränderlichen Nutzerentscheidung. `TaxReviewDecision` referenziert
+genau eine `ValuationDecision` und den historischen `TaxReviewCase`. Eine
+Änderung erzeugt eine lückenlos versionierte Nachfolgezeile mit
+`supersedes_id`; die höchste validierte Version ist effektiv. Die gemeinsame
+`batch_id` auf jeder Einzelentscheidung liefert Gruppierungs- und
+Auditprovenienz, ohne ein redundantes Batch-Domainobjekt einzuführen.
+
+Die API validiert sämtliche Bulkfälle vor dem ersten Insert und persistiert
+Entscheidungen und AuditEvents in einer Transaktion. Sie startet niemals einen
+Taxlauf. Erst ein separat ausgelöster Lauf konsumiert die effektiven
+Entscheidungen. Entscheidung-ID, Version und Wert sind Bestandteil des
+Tax-Snapshots. Historische Reviews, Bewertungen, Journale und Taxläufe werden
+nicht verändert.
+
+Die Python-Dataclass ist bewusst nicht `frozen`, weil SQLAlchemy die Instanz
+instrumentieren muss. Persistenz-Immutability entsteht durch den zentralen
+`before_update`-/`reject_update`-Schutz des Mappers. Eine fachliche Änderung
+erfolgt ausschließlich als neue Zeile mit höherer Version und
+`supersedes_id`; ein SQL-UPDATE des historischen Datensatzes wird abgewiesen.

@@ -31,7 +31,8 @@ class ComparisonContext:
 
 def test_metadata_contains_domain_tables() -> None:
     models.configure_mappings()
-    assert len(Base.metadata.tables) == 30
+    assert len(Base.metadata.tables) == 31
+    assert "tax_review_decisions" in Base.metadata.tables
 
 
 def test_session_dependency_provides_session() -> None:

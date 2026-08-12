@@ -18,9 +18,9 @@ from app.core.valuation import (
 
 FIFO_RULE_VERSION: Final = "fifo-utc-stable-v1"
 FEE_RULE_VERSION: Final = "proportional-last-remainder-v1"
-CLASSIFICATION_RULE_VERSION: Final = "private-assets-reward-fee-review-v2"
-JOURNAL_RULE_VERSION: Final = "tax-journal-reward-gross-v2"
-EXPORT_FORMAT_VERSION: Final = "tax-export-reward-components-v2"
+CLASSIFICATION_RULE_VERSION: Final = "private-assets-reward-fee-decision-v3"
+JOURNAL_RULE_VERSION: Final = "tax-journal-reward-fee-decision-v3"
+EXPORT_FORMAT_VERSION: Final = "tax-export-review-decisions-v3"
 NON_INVENTORY_ASSETS: Final = frozenset({"EUR", "USD"})
 
 
@@ -37,6 +37,11 @@ class TaxRecordStatus(StrEnum):
     RESOLVED = "resolved"
     REVIEW_REQUIRED = "review_required"
     SUPERSEDED = "superseded"
+
+
+class TaxReviewDecisionValue(StrEnum):
+    INCLUDE_AS_WERBUNGSKOSTEN = "include_as_werbungskosten"
+    EXCLUDE_FROM_WERBUNGSKOSTEN = "exclude_from_werbungskosten"
 
 
 class JournalEntryType(StrEnum):
@@ -113,6 +118,9 @@ class AcquisitionInput:
     acquisition_type: str
     gross_income_eur: Decimal | None = None
     platform_fee_candidate_eur: Decimal = Decimal("0")
+    platform_fee_decision: TaxReviewDecisionValue | None = None
+    tax_review_decision_id: UUID | None = None
+    tax_review_decision_version: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -126,6 +134,15 @@ class AcquisitionInput:
         non_negative_decimal(
             self.platform_fee_candidate_eur, "platform_fee_candidate_eur"
         )
+        if (self.platform_fee_decision is None) != (
+            self.tax_review_decision_id is None
+        ):
+            raise ValueError("Review decision and its identifier must be complete.")
+        if self.tax_review_decision_id is not None and (
+            self.tax_review_decision_version is None
+            or self.tax_review_decision_version < 1
+        ):
+            raise ValueError("Review decision version must be positive.")
         object.__setattr__(self, "acquired_at", require_utc(self.acquired_at))
         required_text(self.acquisition_type, "acquisition_type")
 
@@ -313,6 +330,7 @@ class TaxJournalEntry:
     valuation_decision_id: UUID | None = None
     lot_allocation_id: UUID | None = None
     supersedes_id: UUID | None = None
+    tax_review_decision_id: UUID | None = None
     id: UUID = field(default_factory=new_id)
 
     def __post_init__(self) -> None:
@@ -342,6 +360,51 @@ class TaxReviewCase:
         self.code = required_text(self.code, "code")
         self.message = required_text(self.message, "message")
         self.occurred_at = require_utc(self.occurred_at)
+
+
+@dataclass(kw_only=True)
+class TaxReviewDecision:
+    valuation_decision_id: UUID
+    source_tax_review_case_id: UUID
+    decision: TaxReviewDecisionValue
+    reason: str
+    actor_id: str
+    decided_at: datetime
+    version: int
+    batch_id: UUID
+    id: UUID = field(default_factory=new_id)
+    supersedes_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        self.reason = required_text(self.reason, "reason")
+        self.actor_id = required_text(self.actor_id, "actor_id")
+        self.decided_at = require_utc(self.decided_at)
+        if self.version < 1:
+            raise ValueError("Review decision version must be positive.")
+        if (self.version == 1) != (self.supersedes_id is None):
+            raise ValueError("Review decision supersedes chain is inconsistent.")
+
+
+def effective_tax_review_decisions(
+    decisions: list[TaxReviewDecision],
+) -> dict[UUID, TaxReviewDecision]:
+    """Return the effective decision after validating every immutable chain."""
+
+    grouped: dict[UUID, list[TaxReviewDecision]] = {}
+    for decision in decisions:
+        grouped.setdefault(decision.valuation_decision_id, []).append(decision)
+    effective: dict[UUID, TaxReviewDecision] = {}
+    for valuation_id, items in grouped.items():
+        ordered = sorted(items, key=lambda item: (item.version, item.id.hex))
+        if [item.version for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise ValueError("Review decision versions must be consecutive.")
+        previous: TaxReviewDecision | None = None
+        for item in ordered:
+            if item.supersedes_id != (previous.id if previous else None):
+                raise ValueError("Review decision supersedes chain is inconsistent.")
+            previous = item
+        effective[valuation_id] = ordered[-1]
+    return effective
 
 
 @dataclass(kw_only=True)
@@ -407,7 +470,9 @@ def tax_snapshot_hash(
     rows = [
         f"A|{item.acquisition_id}|{item.valuation_decision_id}|{item.quantity}|"
         f"{item.value_eur}|{item.fee_eur}|{item.acquisition_type}|"
-        f"{item.gross_income_eur}|{item.platform_fee_candidate_eur}"
+        f"{item.gross_income_eur}|{item.platform_fee_candidate_eur}|"
+        f"{item.tax_review_decision_id}|{item.tax_review_decision_version}|"
+        f"{item.platform_fee_decision}"
         for item in sorted(
             acquisitions, key=lambda item: (item.acquired_at, item.acquisition_id.hex)
         )
@@ -509,6 +574,36 @@ def calculate_fifo(
         for item in ordered_acquisitions
         if period.start <= item.acquired_at.date() <= period.end
     ]
+    journal.extend(
+        TaxJournalEntry(
+            tax_calculation_run_id=run_id,
+            occurred_at=item.acquired_at,
+            tax_year=item.acquired_at.year,
+            entry_type=JournalEntryType.FEE,
+            asset_code="EUR",
+            quantity=item.platform_fee_candidate_eur,
+            eur_value=item.platform_fee_candidate_eur,
+            proceeds_eur=None,
+            acquisition_cost_eur=None,
+            gain_loss_eur=None,
+            holding_seconds=None,
+            classification=(
+                "Manuell geprüft: Staking-Plattformgebühr als Werbungskosten "
+                "berücksichtigt"
+            ),
+            rule_version=rules.journal,
+            status=TaxRecordStatus.RESOLVED,
+            source_object_type="ValuationDecision",
+            source_object_id=item.valuation_decision_id,
+            valuation_decision_id=item.valuation_decision_id,
+            tax_review_decision_id=item.tax_review_decision_id,
+        )
+        for item in ordered_acquisitions
+        if period.start <= item.acquired_at.date() <= period.end
+        and item.platform_fee_decision
+        is TaxReviewDecisionValue.INCLUDE_AS_WERBUNGSKOSTEN
+        and item.platform_fee_candidate_eur > 0
+    )
     allocations: list[LotAllocation] = []
     calculations: list[DisposalCalculation] = []
     reviews: list[TaxReviewCase] = []

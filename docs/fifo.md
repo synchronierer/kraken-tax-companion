@@ -60,3 +60,10 @@ Typdaten. Zeitraum, Snapshot und Regel-Fingerprint bilden den
 Idempotenzschlüssel. Neue Evidenz oder Regelversionen erzeugen einen neuen,
 auf den Vorgänger verweisenden Lauf; historische Nachweise werden nicht
 überschrieben.
+
+Manuelle Entscheidungen über Staking-Plattformgebühren verändern weder die
+Nettomenge noch den Netto-Anschaffungswert eines InventoryLots. Sie gehören
+nicht zu den proportionalen FIFO-Gebühren. Der Snapshot enthält die effektive
+`TaxReviewDecision`; eine neue Version erzeugt einen neuen Rechenstand, ohne
+FIFO-Regel `fifo-utc-stable-v1` oder Gebührenregel
+`proportional-last-remainder-v1` zu ändern.

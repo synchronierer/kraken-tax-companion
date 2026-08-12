@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Context, Decimal, getcontext, localcontext
@@ -6,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -29,9 +31,12 @@ from app.core.tax import (
     TaxRecordStatus,
     TaxReportingPeriod,
     TaxReviewCase,
+    TaxReviewDecision,
+    TaxReviewDecisionValue,
     TaxRuleVersion,
     TaxRunStatus,
     calculate_fifo,
+    effective_tax_review_decisions,
     tax_snapshot_hash,
 )
 from app.core.transformation import (
@@ -52,6 +57,7 @@ from app.core.valuation import (
     ValuationDecisionStatus,
     ValuationRun,
     ValuationRunStatus,
+    exact_decimal_subtract,
     exact_decimal_sum,
 )
 from app.database.base import Base
@@ -397,6 +403,42 @@ def test_tax_records_validate_immutability_inputs() -> None:
         )
 
 
+def test_tax_review_decision_history_is_deterministic_and_strict() -> None:
+    valuation_id = uuid4()
+    case_id = uuid4()
+    batch_id = uuid4()
+    first = TaxReviewDecision(
+        valuation_decision_id=valuation_id,
+        source_tax_review_case_id=case_id,
+        decision=TaxReviewDecisionValue.INCLUDE_AS_WERBUNGSKOSTEN,
+        reason="Beleg fachlich geprüft",
+        actor_id="local-user",
+        decided_at=NOW,
+        version=1,
+        batch_id=batch_id,
+    )
+    second = TaxReviewDecision(
+        valuation_decision_id=valuation_id,
+        source_tax_review_case_id=case_id,
+        decision=TaxReviewDecisionValue.EXCLUDE_FROM_WERBUNGSKOSTEN,
+        reason="Entscheidung nach erneuter Prüfung geändert",
+        actor_id="local-user",
+        decided_at=NOW + timedelta(minutes=1),
+        version=2,
+        supersedes_id=first.id,
+        batch_id=uuid4(),
+    )
+    assert effective_tax_review_decisions([second, first]) == {valuation_id: second}
+    broken = replace(second, supersedes_id=uuid4())
+    with pytest.raises(ValueError, match="supersedes chain"):
+        effective_tax_review_decisions([first, broken])
+    with pytest.raises(ValueError, match="supersedes"):
+        replace(first, version=2)
+    skipped = replace(second, version=3)
+    with pytest.raises(ValueError, match="consecutive"):
+        effective_tax_review_decisions([first, skipped])
+
+
 def test_csv_pdf_and_export_path_contract(tmp_path: Path) -> None:
     content = csv_bytes(
         ("id", "amount", "occurred_at"),
@@ -466,6 +508,38 @@ def tax_client(tmp_path: Path) -> TestClient:
         yield client
     settings.export_directory = previous_directory
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def tax_review_client(
+    tmp_path: Path,
+) -> Iterator[tuple[TestClient, sessionmaker[Session]]]:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    with sessions() as database:
+        _seed_precise_reward_decisions(database)
+
+    def dependency() -> object:
+        with sessions() as database:
+            yield database
+
+    settings = get_settings()
+    previous_directory = settings.export_directory
+    settings.export_directory = str(tmp_path)
+    app.dependency_overrides[get_session] = dependency
+    try:
+        with TestClient(app) as client:
+            created = client.post("/api/tax-calculations", json={"year": 2026})
+            assert created.status_code == 200
+            yield client, sessions
+    finally:
+        settings.export_directory = previous_directory
+        app.dependency_overrides.clear()
 
 
 PRECISE_GROSS_TOTAL = Decimal("51.586220962002859504121206557501435344829")
@@ -584,6 +658,297 @@ def _seed_precise_reward_decisions(database: Session) -> None:
     database.commit()
 
 
+def _assert_api_error(response: Response, status: int, code: str) -> None:
+    assert response.status_code == status
+    assert response.json()["detail"]["code"] == code
+
+
+def _second_historical_tax_run(database: Session, first_run_id: UUID) -> UUID:
+    first_run = database.get(TaxCalculationRun, first_run_id)
+    assert first_run is not None
+    second_run = TaxCalculationRun(
+        period_start=first_run.period_start,
+        period_end=first_run.period_end,
+        snapshot_hash="e" * 64,
+        rules_fingerprint="f" * 64,
+        status=TaxRunStatus.COMPLETED_WITH_REVIEW,
+        started_at=first_run.started_at + timedelta(seconds=1),
+        ended_at=first_run.started_at + timedelta(seconds=2),
+        checked_events=first_run.checked_events,
+        review_count=1,
+    )
+    database.add(second_run)
+    database.flush()
+    return second_run.id
+
+
+def test_tax_review_domain_decision_reference_invariants() -> None:
+    candidate = acquisition("1", "1", NOW, kind="staking_reward")
+    with pytest.raises(
+        ValueError, match="Review decision and its identifier must be complete"
+    ):
+        replace(
+            candidate,
+            platform_fee_decision=(TaxReviewDecisionValue.INCLUDE_AS_WERBUNGSKOSTEN),
+        )
+    with pytest.raises(ValueError, match="Review decision version must be positive"):
+        replace(
+            candidate,
+            platform_fee_decision=(TaxReviewDecisionValue.INCLUDE_AS_WERBUNGSKOSTEN),
+            tax_review_decision_id=uuid4(),
+            tax_review_decision_version=0,
+        )
+    with pytest.raises(ValueError, match="Review decision version must be positive"):
+        TaxReviewDecision(
+            valuation_decision_id=uuid4(),
+            source_tax_review_case_id=uuid4(),
+            decision=TaxReviewDecisionValue.EXCLUDE_FROM_WERBUNGSKOSTEN,
+            reason="Synthetische Prüfung",
+            actor_id="local-user",
+            decided_at=NOW,
+            version=0,
+            batch_id=uuid4(),
+        )
+
+
+def test_tax_review_api_rejects_inconsistent_decision_history(
+    tax_review_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, sessions = tax_review_client
+    with sessions() as database:
+        valuation = database.scalars(select(ValuationDecision)).first()
+        review_case = database.scalars(select(TaxReviewCase)).first()
+        assert valuation is not None
+        assert review_case is not None
+        database.add(
+            TaxReviewDecision(
+                valuation_decision_id=valuation.id,
+                source_tax_review_case_id=review_case.id,
+                decision=TaxReviewDecisionValue.INCLUDE_AS_WERBUNGSKOSTEN,
+                reason="Historie mit absichtlicher Versionslücke",
+                actor_id="local-user",
+                decided_at=NOW,
+                version=2,
+                supersedes_id=uuid4(),
+                batch_id=uuid4(),
+            )
+        )
+        database.commit()
+        count_before = database.scalar(
+            select(func.count()).select_from(TaxReviewDecision)
+        )
+
+    response = client.get("/api/tax-review-decisions")
+    _assert_api_error(response, 409, "tax_review_decision_history_inconsistent")
+    with sessions() as database:
+        assert (
+            database.scalar(select(func.count()).select_from(TaxReviewDecision))
+            == count_before
+        )
+
+
+def test_tax_review_write_validation_and_bulk_duplicates(
+    tax_review_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, sessions = tax_review_client
+    with sessions() as database:
+        valid_case = database.scalars(select(TaxReviewCase)).first()
+        assert valid_case is not None
+        current = database.get(ValuationDecision, valid_case.source_object_id)
+        assert current is not None
+        run_id = valid_case.tax_calculation_run_id
+        wrong_kind = TaxReviewCase(
+            tax_calculation_run_id=run_id,
+            code="tax_other_review",
+            message="Anderer fachlicher Prüffall",
+            source_object_type="ValuationDecision",
+            source_object_id=current.id,
+            occurred_at=NOW,
+        )
+        missing_valuation = TaxReviewCase(
+            tax_calculation_run_id=run_id,
+            code="tax_staking_platform_fee_candidate_review",
+            message="Bewertung fehlt absichtlich",
+            source_object_type="ValuationDecision",
+            source_object_id=uuid4(),
+            occurred_at=NOW,
+        )
+        no_candidate = database.scalars(
+            select(ValuationDecision).where(
+                ValuationDecision.fee_tax_review_status
+                == FeeTaxReviewStatus.NOT_REQUIRED
+            )
+        ).first()
+        assert no_candidate is not None
+        no_candidate_case = TaxReviewCase(
+            tax_calculation_run_id=run_id,
+            code="tax_staking_platform_fee_candidate_review",
+            message="Keine Gebührenkomponente",
+            source_object_type="ValuationDecision",
+            source_object_id=no_candidate.id,
+            occurred_at=NOW,
+        )
+        historical_run_id = _second_historical_tax_run(database, run_id)
+        duplicate_valuation_case = TaxReviewCase(
+            tax_calculation_run_id=historical_run_id,
+            code="tax_staking_platform_fee_candidate_review",
+            message="Historischer zweiter Prüffall",
+            source_object_type="ValuationDecision",
+            source_object_id=current.id,
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+        database.add_all(
+            (wrong_kind, missing_valuation, no_candidate_case, duplicate_valuation_case)
+        )
+        database.commit()
+
+    request = {
+        "decision": "include_as_werbungskosten",
+        "reason": "Synthetische Vertragsprüfung",
+    }
+    for case_id, status, code in (
+        (wrong_kind.id, 409, "tax_review_case_not_decidable_as_staking_fee"),
+        (missing_valuation.id, 404, "valuation_decision_not_found"),
+        (no_candidate_case.id, 409, "tax_review_valuation_not_fee_candidate"),
+    ):
+        response = client.post(
+            "/api/tax-review-decisions",
+            json={**request, "tax_review_case_id": str(case_id)},
+        )
+        _assert_api_error(response, status, code)
+
+    duplicate_cases = client.post(
+        "/api/tax-review-decisions/bulk",
+        json={
+            **request,
+            "tax_review_case_ids": [str(valid_case.id), str(valid_case.id)],
+        },
+    )
+    _assert_api_error(duplicate_cases, 422, "tax_review_duplicate_case_ids")
+    duplicate_valuations = client.post(
+        "/api/tax-review-decisions/bulk",
+        json={
+            **request,
+            "tax_review_case_ids": [
+                str(valid_case.id),
+                str(duplicate_valuation_case.id),
+            ],
+        },
+    )
+    _assert_api_error(duplicate_valuations, 422, "tax_review_duplicate_valuation_ids")
+    with sessions() as database:
+        assert database.scalar(select(func.count()).select_from(TaxReviewDecision)) == 0
+        assert (
+            database.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(AuditEvent.event_type == "tax.review_decision_created")
+            )
+            == 0
+        )
+
+
+def test_tax_review_rejects_superseded_valuation(
+    tax_review_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, sessions = tax_review_client
+    with sessions() as database:
+        review_case = database.scalars(select(TaxReviewCase)).first()
+        assert review_case is not None
+        old = database.get(ValuationDecision, review_case.source_object_id)
+        assert old is not None
+        database.add(
+            replace(
+                old,
+                id=uuid4(),
+                version=old.version + 1,
+                supersedes_id=old.id,
+                decided_at=old.decided_at + timedelta(seconds=1),
+            )
+        )
+        database.commit()
+
+    response = client.post(
+        "/api/tax-review-decisions",
+        json={
+            "tax_review_case_id": str(review_case.id),
+            "decision": "include_as_werbungskosten",
+            "reason": "Alte Bewertung darf nicht entschieden werden",
+        },
+    )
+    _assert_api_error(response, 409, "tax_review_valuation_superseded")
+    with sessions() as database:
+        assert database.scalar(select(func.count()).select_from(TaxReviewDecision)) == 0
+
+
+def test_tax_review_list_filters_and_skips_non_contract_rows(
+    tax_review_client: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, sessions = tax_review_client
+    with sessions() as database:
+        valid_case = database.scalars(select(TaxReviewCase)).first()
+        assert valid_case is not None
+        valuation = database.get(ValuationDecision, valid_case.source_object_id)
+        assert valuation is not None
+        run_id = valid_case.tax_calculation_run_id
+        historical_run_id = _second_historical_tax_run(database, run_id)
+        database.add_all(
+            (
+                TaxReviewCase(
+                    tax_calculation_run_id=run_id,
+                    code="tax_other_review",
+                    message="Nicht anzeigbarer Prüffall",
+                    source_object_type="ValuationDecision",
+                    source_object_id=valuation.id,
+                    occurred_at=NOW - timedelta(days=1),
+                ),
+                TaxReviewCase(
+                    tax_calculation_run_id=run_id,
+                    code="tax_staking_platform_fee_candidate_review",
+                    message="Fehlende Bewertung",
+                    source_object_type="ValuationDecision",
+                    source_object_id=uuid4(),
+                    occurred_at=NOW - timedelta(seconds=1),
+                ),
+                TaxReviewCase(
+                    tax_calculation_run_id=historical_run_id,
+                    code="tax_staking_platform_fee_candidate_review",
+                    message="Doppelter historischer Prüffall",
+                    source_object_type="ValuationDecision",
+                    source_object_id=valuation.id,
+                    occurred_at=NOW + timedelta(days=1),
+                ),
+            )
+        )
+        database.commit()
+
+    resolved = client.post(
+        "/api/tax-review-decisions",
+        json={
+            "tax_review_case_id": str(valid_case.id),
+            "decision": "include_as_werbungskosten",
+            "reason": "Synthetische Filterprüfung",
+        },
+    )
+    assert resolved.status_code == 200
+    assert client.get("/api/tax-review-decisions?year=2025").json()["total"] == 0
+    open_page = client.get("/api/tax-review-decisions?status=open&limit=100").json()
+    assert open_page["total"] == 47
+    assert all(item["status"] == "open" for item in open_page["items"])
+    assert client.get("/api/tax-review-decisions?asset=BTC").json()["total"] == 0
+    assert (
+        client.get(
+            "/api/tax-review-decisions?decision=exclude_from_werbungskosten"
+        ).json()["total"]
+        == 0
+    )
+    included = client.get(
+        "/api/tax-review-decisions?decision=include_as_werbungskosten"
+    ).json()
+    assert included["total"] == 1
+    assert included["items"][0]["valuation_decision_id"] == str(valuation.id)
+
+
 def test_tax_api_empty_validation_and_openapi(tax_client: TestClient) -> None:
     for path in (
         "/api/tax-calculations",
@@ -591,6 +956,7 @@ def test_tax_api_empty_validation_and_openapi(tax_client: TestClient) -> None:
         "/api/lot-allocations",
         "/api/tax-journal",
         "/api/exports",
+        "/api/tax-review-decisions",
     ):
         response = tax_client.get(path)
         assert response.status_code == 200
@@ -602,6 +968,10 @@ def test_tax_api_empty_validation_and_openapi(tax_client: TestClient) -> None:
     assert summary.json()["gross_staking_income"] == "0"
     assert summary.json()["staking_fee_candidates"] == "0"
     assert summary.json()["provisional_net_staking_income"] == "0"
+    assert summary.json()["staking_fee_included"] == "0"
+    assert summary.json()["staking_fee_excluded"] == "0"
+    assert summary.json()["staking_fee_open"] == "0"
+    assert summary.json()["reviewed_net_staking_income"] == "0"
     random_id = uuid4()
     for path in (
         f"/api/tax-calculations/{random_id}",
@@ -636,6 +1006,8 @@ def test_tax_api_empty_validation_and_openapi(tax_client: TestClient) -> None:
         "/api/tax-summary",
         "/api/exports",
         "/api/exports/{item_id}/download",
+        "/api/tax-review-decisions",
+        "/api/tax-review-decisions/bulk",
     ):
         assert path in schema["paths"]
 
@@ -725,6 +1097,187 @@ def test_precise_reward_tax_run_is_exact_persistent_and_idempotent() -> None:
         assert {item.code for item in reviews} == {
             "tax_staking_platform_fee_candidate_review"
         }
+
+
+def test_staking_fee_review_bulk_versions_tax_runs_and_summary(tmp_path: Path) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    with sessions() as database:
+        _seed_precise_reward_decisions(database)
+
+    def dependency() -> object:
+        with sessions() as database:
+            yield database
+
+    context_before = getcontext().copy()
+    settings = get_settings()
+    previous_directory = settings.export_directory
+    settings.export_directory = str(tmp_path)
+    app.dependency_overrides[get_session] = dependency
+    try:
+        with TestClient(app) as client:
+            first_run = client.post("/api/tax-calculations", json={"year": 2026})
+            assert first_run.status_code == 200
+            assert first_run.json()["status"] == "completed_with_review"
+            open_page = client.get(
+                "/api/tax-review-decisions?year=2026&status=open&limit=100"
+            )
+            assert open_page.status_code == 200
+            open_items = open_page.json()["items"]
+            assert len(open_items) == 48
+            case_ids = [item["tax_review_case_id"] for item in open_items]
+
+            invalid = client.post(
+                "/api/tax-review-decisions/bulk",
+                json={
+                    "tax_review_case_ids": [*case_ids[:-1], str(uuid4())],
+                    "decision": "include_as_werbungskosten",
+                    "reason": "Synthetische gemeinsame Belegprüfung",
+                },
+            )
+            assert invalid.status_code == 404
+            with sessions() as database:
+                assert (
+                    database.scalar(select(func.count()).select_from(TaxReviewDecision))
+                    == 0
+                )
+                assert (
+                    database.scalar(
+                        select(func.count())
+                        .select_from(AuditEvent)
+                        .where(AuditEvent.event_type == "tax.review_decision_created")
+                    )
+                    == 0
+                )
+
+            included = client.post(
+                "/api/tax-review-decisions/bulk",
+                json={
+                    "tax_review_case_ids": case_ids,
+                    "decision": "include_as_werbungskosten",
+                    "reason": "Synthetische gemeinsame Belegprüfung",
+                },
+            )
+            assert included.status_code == 200
+            assert included.json()["created_count"] == 48
+            assert included.json()["superseded_count"] == 0
+            with sessions() as database:
+                persisted = database.scalars(
+                    select(TaxReviewDecision).order_by(TaxReviewDecision.id)
+                ).first()
+                assert persisted is not None
+                persisted_id = persisted.id
+                persisted_reason = persisted.reason
+                persisted.reason = "Unzulässige Mutation"
+                with pytest.raises(ValueError, match="Immutable records"):
+                    database.commit()
+                database.rollback()
+            with sessions() as database:
+                unchanged = database.get(TaxReviewDecision, persisted_id)
+                assert unchanged is not None
+                assert unchanged.reason == persisted_reason
+            second_run = client.post("/api/tax-calculations", json={"year": 2026})
+            assert second_run.status_code == 200
+            assert second_run.json()["duplicate"] is False
+            assert second_run.json()["status"] == "completed"
+            assert second_run.json()["reviews"] == 0
+            second_summary = client.get("/api/tax-summary?year=2026").json()
+            assert Decimal(second_summary["staking_fee_included"]) == PRECISE_FEE_TOTAL
+            assert Decimal(second_summary["staking_fee_excluded"]) == 0
+            assert Decimal(second_summary["staking_fee_open"]) == 0
+            assert (
+                Decimal(second_summary["reviewed_net_staking_income"])
+                == PRECISE_NET_TOTAL
+            )
+            exported = client.post(
+                "/api/exports",
+                json={
+                    "tax_calculation_run_id": second_run.json()["id"],
+                    "kind": "reviews_csv",
+                },
+            )
+            assert exported.status_code == 200
+            review_csv = client.get(exported.json()["download_url"])
+            assert review_csv.status_code == 200
+            assert b"include_as_werbungskosten" in review_csv.content
+            assert b"Synthetische gemeinsame Belegpr" in review_csv.content
+
+            changed_case = case_ids[0]
+            changed_value = Decimal(open_items[0]["fee_value_eur"])
+            excluded = client.post(
+                "/api/tax-review-decisions",
+                json={
+                    "tax_review_case_id": changed_case,
+                    "decision": "exclude_from_werbungskosten",
+                    "reason": "Synthetische geänderte Einzelentscheidung",
+                },
+            )
+            assert excluded.status_code == 200
+            assert excluded.json()["version"] == 2
+            assert excluded.json()["supersedes_id"] is not None
+            third_run = client.post("/api/tax-calculations", json={"year": 2026})
+            assert third_run.status_code == 200
+            assert third_run.json()["duplicate"] is False
+            third_summary = client.get("/api/tax-summary?year=2026").json()
+            assert Decimal(third_summary["staking_fee_included"]) == (
+                exact_decimal_subtract(PRECISE_FEE_TOTAL, changed_value)
+            )
+            assert Decimal(third_summary["staking_fee_excluded"]) == changed_value
+            assert Decimal(third_summary["staking_fee_open"]) == 0
+            assert Decimal(third_summary["reviewed_net_staking_income"]) == (
+                exact_decimal_sum((PRECISE_NET_TOTAL, changed_value))
+            )
+            history = client.get(
+                "/api/tax-review-decisions?year=2026&status=resolved&limit=100"
+            ).json()
+            changed = next(
+                item
+                for item in history["items"]
+                if item["tax_review_case_id"] == changed_case
+            )
+            assert [item["version"] for item in changed["history"]] == [1, 2]
+    finally:
+        settings.export_directory = previous_directory
+        app.dependency_overrides.clear()
+
+    assert_decimal_context_unchanged(context_before)
+    with sessions() as database:
+        decisions = tuple(database.scalars(select(TaxReviewDecision)))
+        assert len(decisions) == 49
+        assert len({item.batch_id for item in decisions if item.version == 1}) == 1
+        assert all(item.version == 1 for item in decisions if item.version == 1)
+        runs = tuple(database.scalars(select(TaxCalculationRun)))
+        assert len(runs) == 3
+        assert sum(item.status is TaxRunStatus.SUPERSEDED for item in runs) == 2
+        latest = max(runs, key=lambda item: item.started_at)
+        journal = tuple(
+            database.scalars(
+                select(TaxJournalEntry).where(
+                    TaxJournalEntry.tax_calculation_run_id == latest.id
+                )
+            )
+        )
+        assert (
+            sum(item.entry_type is JournalEntryType.EARN_INFLOW for item in journal)
+            == 55
+        )
+        assert sum(item.entry_type is JournalEntryType.FEE for item in journal) == 47
+        assert not any(item.entry_type is JournalEntryType.REVIEW for item in journal)
+        lots = tuple(
+            database.scalars(
+                select(InventoryLot).where(
+                    InventoryLot.tax_calculation_run_id == latest.id
+                )
+            )
+        )
+        assert exact_decimal_sum(tuple(item.remaining_cost_eur for item in lots)) == (
+            PRECISE_NET_TOTAL
+        )
 
 
 def test_tax_workflow_rolls_back_all_records_after_unexpected_failure(

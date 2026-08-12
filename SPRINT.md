@@ -1,5 +1,10 @@
 # Sprint 3B – FIFO, Steuerjournal und Exporte
 
+> Folgearbeit Sprint 3C (in Arbeit): persistenzseitig immutable Einzel- und
+> Sammelentscheidungen für Staking-Plattformgebührenkandidaten. Keine
+> Entscheidung wird automatisiert; ein neuer Taxlauf bleibt eine getrennte,
+> bewusste Benutzeraktion.
+
 ## Ziel und sichtbares Nutzerergebnis
 
 Sprint 3B ergänzt die bewerteten fachlichen Ereignisse um eine deterministische

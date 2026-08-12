@@ -1,5 +1,14 @@
 # Weboberfläche
 
+## Staking-Plattformgebühren prüfen
+
+Die Seite „Prüffälle“ zeigt offene und entschiedene Gebührenkandidaten,
+EUR-Werte und Entscheidungshistorien. Einzelne oder alle offenen Zeilen können
+ausgewählt werden. Entscheidung und Begründung sind Pflicht; keine Option ist
+vorausgewählt und es gibt kein automatisches Absenden. Nach dem Speichern weist
+die Oberfläche darauf hin, dass ein neuer Taxlauf separat gestartet werden
+muss.
+
 Die React-Anwendung ist eine reine Präsentationsschicht und verwendet
 ausschließlich die REST-API. Sie enthält keine fachlichen Berechnungen und
 keine Mockdaten.

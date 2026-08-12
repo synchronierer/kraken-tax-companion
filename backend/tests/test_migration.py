@@ -85,6 +85,7 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "disposal_calculations",
         "tax_journal_entries",
         "tax_review_cases",
+        "tax_review_decisions",
         "export_runs",
         "export_artifacts",
     }
@@ -139,12 +140,28 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
     assert {
         index["name"] for index in inspector.get_indexes("tax_journal_entries")
     } == {"ix_tax_journal_year_type"}
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("tax_review_decisions")
+    } == {"uq_tax_review_decision_version"}
+    assert "tax_review_decision_id" in {
+        column["name"] for column in inspector.get_columns("tax_journal_entries")
+    }
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM raw_import_records")) == 1
         assert (
             connection.scalar(text("SELECT canonical_key FROM raw_import_records"))
             == "kraken:spot_ledger:L-existing"
         )
+
+    command.downgrade(config, "0008_reward_valuation_components")
+    assert "tax_review_decisions" not in inspect(engine).get_table_names()
+    assert "tax_review_decision_id" not in {
+        column["name"] for column in inspect(engine).get_columns("tax_journal_entries")
+    }
+    command.upgrade(config, "head")
+    command.check(config)
+    assert "tax_review_decisions" in inspect(engine).get_table_names()
 
     command.downgrade(config, "0007_kraken_ledger_identity")
     assert "gross_income_eur" not in {

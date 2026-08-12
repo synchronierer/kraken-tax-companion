@@ -111,3 +111,14 @@ test("presentation rules cover empty state, validation, reviews and secrets", as
   );
   assert.equal(model.pageQuery(-1, 1000), "offset=0&limit=200");
 });
+
+test("staking fee review requires an explicit decision and separate tax run", async () => {
+  const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(source, /Staking-Plattformgebühren prüfen/);
+  assert.match(source, /Keine Entscheidung ausgewählt/);
+  assert.match(source, /Als Werbungskosten berücksichtigen/);
+  assert.match(source, /Nicht als Werbungskosten berücksichtigen/);
+  assert.match(source, /Begründung/);
+  assert.match(source, /neuer Taxlauf erforderlich/);
+  assert.doesNotMatch(source, /tax-review-decisions[\s\S]{0,500}tax-calculations/);
+});

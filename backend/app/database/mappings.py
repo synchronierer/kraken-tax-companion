@@ -43,6 +43,8 @@ from app.core.tax import (
     TaxJournalEntry,
     TaxRecordStatus,
     TaxReviewCase,
+    TaxReviewDecision,
+    TaxReviewDecisionValue,
     TaxRunStatus,
 )
 from app.core.transformation import (
@@ -838,6 +840,11 @@ tax_journal_entries = Table(
     Column("valuation_decision_id", UUID, ForeignKey("valuation_decisions.id")),
     Column("lot_allocation_id", UUID, ForeignKey("lot_allocations.id")),
     Column("supersedes_id", UUID, ForeignKey("tax_journal_entries.id")),
+    Column(
+        "tax_review_decision_id",
+        UUID,
+        ForeignKey("tax_review_decisions.id", name="fk_tax_journal_review_decision"),
+    ),
     UniqueConstraint(
         "tax_calculation_run_id",
         "entry_type",
@@ -869,6 +876,39 @@ tax_review_cases = Table(
         "source_object_id",
         name="uq_tax_review_source",
     ),
+)
+
+tax_review_decisions = Table(
+    "tax_review_decisions",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "valuation_decision_id",
+        UUID,
+        ForeignKey("valuation_decisions.id"),
+        nullable=False,
+    ),
+    Column(
+        "source_tax_review_case_id",
+        UUID,
+        ForeignKey("tax_review_cases.id"),
+        nullable=False,
+    ),
+    Column("decision", Enum(TaxReviewDecisionValue, native_enum=False), nullable=False),
+    Column("reason", String(1024), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("decided_at", UtcDateTime(), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("supersedes_id", UUID, ForeignKey("tax_review_decisions.id")),
+    Column("batch_id", UUID, nullable=False),
+    UniqueConstraint(
+        "valuation_decision_id", "version", name="uq_tax_review_decision_version"
+    ),
+    CheckConstraint(
+        "version > 0 AND length(reason) > 0 AND length(actor_id) > 0",
+        name="ck_tax_review_decision_values",
+    ),
+    Index("ix_tax_review_decision_batch", "batch_id"),
 )
 
 export_runs = Table(
@@ -947,6 +987,7 @@ def configure_mappings() -> None:
         mapper_registry.map_imperatively(DisposalCalculation, disposal_calculations),
         mapper_registry.map_imperatively(TaxJournalEntry, tax_journal_entries),
         mapper_registry.map_imperatively(TaxReviewCase, tax_review_cases),
+        mapper_registry.map_imperatively(TaxReviewDecision, tax_review_decisions),
         mapper_registry.map_imperatively(ExportArtifact, export_artifacts),
     ]
     mapper_registry.map_imperatively(ImportSession, import_sessions)

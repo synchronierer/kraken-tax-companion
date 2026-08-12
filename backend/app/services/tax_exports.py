@@ -71,6 +71,14 @@ def tax_report_pdf(
         f"Saldiertes Ergebnis: {summary.get('net_result', '0')} EUR",
         f"Anzahl Earn-Zufluesse: {summary.get('earn_inflows', '0')}",
         f"Gebuehren: {summary.get('fees', '0')} EUR",
+        "Staking-Gebuehrenkandidaten: "
+        f"{summary.get('staking_fee_candidates', '0')} EUR",
+        f"Manuell beruecksichtigt: {summary.get('staking_fee_included', '0')} EUR",
+        "Manuell nicht beruecksichtigt: "
+        f"{summary.get('staking_fee_excluded', '0')} EUR",
+        f"Noch offen: {summary.get('staking_fee_open', '0')} EUR",
+        "Gepruefter Netto-Arbeitswert: "
+        f"{summary.get('reviewed_net_staking_income', '0')} EUR",
         "Gewinne und Verluste",
         "Earn-Zufluesse",
         "Gebuehren",

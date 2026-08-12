@@ -1,5 +1,19 @@
 # API
 
+## Steuerliche Reviewentscheidungen
+
+- `GET /api/tax-review-decisions` listet offene und entschiedene
+  Staking-Gebührenprüfungen mit Historie. Filter sind `year`, `status`, `asset`
+  und `decision`.
+- `POST /api/tax-review-decisions` dokumentiert eine Einzelentscheidung.
+- `POST /api/tax-review-decisions/bulk` dokumentiert atomar bis zu 200
+  Einzelentscheidungen mit gemeinsamer `batch_id`.
+
+Zulässige Werte sind `include_as_werbungskosten` und
+`exclude_from_werbungskosten`. Eine leere Begründung, doppelte IDs, fremde
+Reviewarten, supersedierte Bewertungen oder ungeeignete Gebührenbewertungen
+werden abgewiesen. Kein Endpunkt startet automatisch einen Taxlauf.
+
 ## Principles
 
 Public capabilities are specified before exposure. Domain entities are not

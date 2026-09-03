@@ -32,6 +32,20 @@ test("api client composes same-origin paths and distinguishes failures", async (
       new Response(
         JSON.stringify({
           detail: {
+            code: "kraken_unavailable",
+            message: "Kraken ist vorübergehend nicht erreichbar.",
+          },
+        }),
+        { status: 503, headers: { "content-type": "application/json" } },
+      );
+    await assert.rejects(
+      module.request("/api/kraken-sync"),
+      /Kraken ist vorübergehend nicht erreichbar/,
+    );
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          detail: {
             code: "manual_csv_invalid",
             message: "Die Kurs-CSV ist ungültig.",
             line: 3,
@@ -186,4 +200,18 @@ test("staking fee review requires an explicit decision and separate tax run", as
 test("export list exposes the independent format version", async () => {
   const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(source, /"format_version"/);
+});
+
+test("Kraken sync remains a manual isolated workflow", async () => {
+  const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(source, /Kraken synchronisieren/);
+  assert.match(source, /Letzter erfolgreicher Sync/);
+  assert.match(source, /Nächster Abrufzeitraum/);
+  assert.match(source, /Synchronisierung läuft/);
+  assert.match(source, /Neu importiert/);
+  assert.match(source, /Neue Domainobjekte/);
+  assert.match(source, /Reviews/);
+  assert.match(source, /disabled={busy\|\|Boolean\(syncState\.data\?\.processing_sync\)}/);
+  assert.match(source, /request<Row>\("\/api\/kraken-sync",\{method:"POST"\}\)/);
+  assert.doesNotMatch(source.match(/async function synchronize\(\).*?\n/)?.[0] ?? "", /valuations|tax-calculations|exports|tax-review/);
 });

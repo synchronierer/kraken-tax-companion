@@ -12,6 +12,7 @@ from app.core.entities import (
     RawImportRecord,
     Sale,
 )
+from app.core.incremental_sync import IncrementalSyncRun, SyncStatus
 from app.core.tax import (
     DisposalCalculation,
     ExportArtifact,
@@ -52,6 +53,8 @@ __all__ = [
     "ImportSession",
     "ImportStatus",
     "InventoryLot",
+    "IncrementalSyncRun",
+    "SyncStatus",
     "LotAllocation",
     "PriceSnapshot",
     "RawImportRecord",

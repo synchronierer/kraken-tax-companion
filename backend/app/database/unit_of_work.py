@@ -62,13 +62,19 @@ class SqlAlchemyUnitOfWork:
     domain_provenance: DomainProvenanceRepository
     valuation_requirements: ValuationRequirementRepository
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        external_session: Session | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._external_session = external_session
         self._session: Session | None = None
         self.committed = False
 
     def __enter__(self) -> Self:
-        self._session = self._session_factory()
+        self._session = self._external_session or self._session_factory()
         self.earn_lots = SqlAlchemyRepository(self._session, EarnLot)
         self.sales = SqlAlchemyRepository(self._session, Sale)
         self.import_sessions = SqlAlchemyImportSessionRepository(self._session)
@@ -113,6 +119,9 @@ class SqlAlchemyUnitOfWork:
         del exc_value, traceback
         if self._session is None:
             return
+        if self._external_session is not None:
+            self._session = None
+            return
         if exc_type is not None or not self.committed:
             self._session.rollback()
         self._session.close()
@@ -122,7 +131,10 @@ class SqlAlchemyUnitOfWork:
         self._require_session().flush()
 
     def commit(self) -> None:
-        self._require_session().commit()
+        if self._external_session is None:
+            self._require_session().commit()
+        else:
+            self._require_session().flush()
         self.committed = True
 
     def rollback(self) -> None:

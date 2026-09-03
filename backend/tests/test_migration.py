@@ -81,6 +81,7 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "provider_evidence",
         "tax_calculation_runs",
         "inventory_lots",
+        "kraken_sync_runs",
         "lot_allocations",
         "disposal_calculations",
         "tax_journal_entries",
@@ -104,6 +105,20 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         constraint["name"]
         for constraint in inspector.get_unique_constraints("raw_import_records")
     } == {"uq_raw_import_canonical_key", "uq_raw_import_session_sequence"}
+    assert {index["name"] for index in inspector.get_indexes("kraken_sync_runs")} == {
+        "ix_kraken_sync_checkpoint",
+        "uq_kraken_sync_active",
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints("kraken_sync_runs")
+    } == {
+        "ck_kraken_sync_classification",
+        "ck_kraken_sync_counts",
+        "ck_kraken_sync_digest",
+        "ck_kraken_sync_status",
+        "ck_kraken_sync_window",
+    }
     assert any(
         constraint["column_names"] == ["stable_key"]
         for constraint in inspector.get_unique_constraints("trade_executions")
@@ -263,7 +278,6 @@ def test_export_format_migration_backfills_legacy_runs(
                 },
             )
     command.upgrade(config, "0010_export_format_version")
-    command.check(config)
     with engine.connect() as connection:
         versions = {
             row["kind"]: row["format_version"]
@@ -275,10 +289,14 @@ def test_export_format_migration_backfills_legacy_runs(
         "TAX_REPORT_PDF": "tax-report-pdf-v1",
         "TAX_JOURNAL_CSV": "tax-journal-csv-v1",
     }
+    command.upgrade(config, "head")
+    command.check(config)
+    command.downgrade(config, "0010_export_format_version")
     command.downgrade(config, "0009_tax_review_decisions")
     assert "format_version" not in {
         column["name"] for column in inspect(engine).get_columns("export_runs")
     }
     command.upgrade(config, "0010_export_format_version")
+    command.upgrade(config, "head")
     command.check(config)
     get_settings.cache_clear()

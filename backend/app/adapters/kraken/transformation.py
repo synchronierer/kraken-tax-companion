@@ -131,6 +131,7 @@ class KrakenTransformationService:
         self,
         *,
         import_session_ids: Sequence[UUID],
+        context_import_session_ids: Sequence[UUID] = (),
         actor_id: str,
         contract_version: str = TRANSFORMATION_CONTRACT_VERSION,
     ) -> TransformationResult:
@@ -146,7 +147,10 @@ class KrakenTransformationService:
         try:
             with self._unit_of_work_factory() as unit:
                 unit.transformation_runs.add(run)
-                for session_id in import_session_ids:
+                linked_sessions = tuple(
+                    dict.fromkeys((*import_session_ids, *context_import_session_ids))
+                )
+                for session_id in linked_sessions:
                     unit.transformation_run_sessions.add(
                         TransformationRunSession(
                             transformation_run_id=run.id,
@@ -160,7 +164,10 @@ class KrakenTransformationService:
                 self._audit(unit, run, "transformation.started", {})
                 records = unit.raw_imports.list_by_import_sessions(import_session_ids)
                 run.checked_records = len(records)
-                ledger_groups = self._ledger_groups(records)
+                context_records = unit.raw_imports.list_by_import_sessions(
+                    context_import_session_ids
+                )
+                ledger_groups = self._ledger_groups((*records, *context_records))
                 grouped_ids = {
                     record.id
                     for group in ledger_groups.values()

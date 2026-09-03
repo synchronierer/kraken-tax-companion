@@ -1,5 +1,22 @@
 # Kraken-Live-Ledger-Vorschau
 
+## Inkrementeller manueller Sync
+
+`GET /api/kraken-sync` zeigt letzten Erfolg, aktiven Lauf und das nächste
+halboffene UTC-Abruffenster. `POST /api/kraken-sync` liest ausschließlich
+`/0/private/Ledgers`, importiert neue Ledger-IDs idempotent und transformiert
+sie atomar. `/api/kraken-sync-runs` liefert die Audit-Historie.
+
+Das Lookback-Fenster überlappt absichtlich. Bekannte `ledger_id`-Werte werden
+geprüft und niemals überschrieben. Nur `COMPLETED` schreibt den impliziten
+Checkpoint fort. Kraken-Sync ist nicht Bewertung, Steuerberechnung,
+Reviewentscheidung oder Export und startet keinen dieser Abläufe.
+
+Wegen der offsetbasierten Provider-Pagination wird jedes fixierte Fenster
+zweimal vollständig gelesen. Nur identische ID-Digests und kanonische
+Fingerprints werden übernommen. Ein abweichender Kontrollabruf schlägt sicher
+fehl und wird mit dem Lookback erneut versucht.
+
 Der erste Live-API-Schritt ist ein Dry-Run. Er liest das Spot-Ledger vollständig
 seitenweise, erzeugt eine Diagnose und persistiert weder `ImportSession` noch
 Rohdatensatz, Transformation, Bewertung oder Steuerberechnung. Erst ein

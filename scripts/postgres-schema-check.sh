@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT="sprint3b_schema_${UID}_$$"
+PROJECT="sprint4a_schema_${UID}_$$"
 CONTAINER="${PROJECT}_postgres"
 NETWORK="${PROJECT}_network"
 CACHE="${XDG_CACHE_HOME:-/tmp/kraken-tax-tool-cache}"
@@ -47,8 +47,11 @@ if not path.is_relative_to(Path("/source/app")):
 PY
     /cache/venv/bin/alembic upgrade head
     /cache/venv/bin/alembic check
+    /cache/venv/bin/alembic downgrade 0010_export_format_version
+    /cache/venv/bin/alembic upgrade head
+    /cache/venv/bin/alembic check
     /cache/venv/bin/alembic downgrade 0007_kraken_ledger_identity
     /cache/venv/bin/alembic upgrade head
     /cache/venv/bin/alembic check
   '
-echo SPRINT_3B_POSTGRES_SCHEMA_OK
+echo SPRINT_4A_POSTGRES_SCHEMA_OK

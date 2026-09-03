@@ -224,6 +224,23 @@ Idempotenzvertrag. Abweichende Daten oder Regeln erzeugen einen neuen Lauf mit
 Vorgängerreferenz. Exporte verwenden registrierte Artefakte, sichere
 Basisnamen und ein konfiguriertes Wurzelverzeichnis.
 
+## Inkrementeller Kraken-Sync
+
+`IncrementalSyncRun` ist Laufjournal und Checkpointquelle. Nur ein vollständig
+abgeschlossener `COMPLETED`-Lauf bestimmt die nächste Obergrenze. Der nächste
+Abruf beginnt absichtlich um das konfigurierte Lookback-Fenster früher. Die
+Zeitgrenze ist nur Fensteranker; stabile Provideridentität bleibt Kraken
+`ledger_id`, geschützt durch den eindeutigen kanonischen Raw-Key.
+
+Alle Providerseiten werden vollständig geprüft, bevor Nutzdaten geschrieben
+werden. Import, Raw-zu-Domain-Transformation und erfolgreicher Laufabschluss
+bilden einen atomaren Datenbankarbeitsumfang. Ein partieller eindeutiger Index
+erlaubt je Scope nur einen `PROCESSING`-Lauf. Veraltete Läufe werden nach dem
+konfigurierten Timeout sichtbar als `FAILED` beendet.
+
+Kraken-Sync ist nicht EUR-Bewertung, Steuerberechnung, Reviewentscheidung oder
+Export. Keiner dieser Abläufe wird automatisch gestartet.
+
 ## Cross-Cutting Concerns
 
 ### Configuration and Logging

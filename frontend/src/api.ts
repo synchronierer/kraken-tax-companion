@@ -41,6 +41,12 @@ function backendErrorMessage(detail: unknown): string {
   return `${message}${position}`;
 }
 
+function isSafeProviderProblem(detail: unknown): boolean {
+  if (typeof detail !== "object" || detail === null) return false;
+  const code = (detail as { code?: unknown }).code;
+  return typeof code === "string" && code.startsWith("kraken_");
+}
+
 export async function request<T>(
   path: string,
   options: RequestInit = {},
@@ -52,7 +58,7 @@ export async function request<T>(
       detail?: unknown;
     };
     if (!response.ok) {
-      if (response.status >= 500) {
+      if (response.status >= 500 && !isSafeProviderProblem(body.detail)) {
         throw new Error(
           "Das Backend hat die Anfrage nicht verarbeiten können.",
         );

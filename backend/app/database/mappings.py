@@ -13,8 +13,10 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy.orm import Mapper
+from sqlalchemy.orm.attributes import instance_state
 from sqlalchemy.types import Uuid
 
 from app.core.entities import (
@@ -30,6 +32,7 @@ from app.core.entities import (
     RawImportRecord,
     Sale,
 )
+from app.core.incremental_sync import IncrementalSyncRun, SyncStatus
 from app.core.tax import (
     DisposalCalculation,
     ExportArtifact,
@@ -199,6 +202,90 @@ raw_import_records = Table(
         "import_session_id",
         "sequence_number",
         name="uq_raw_import_session_sequence",
+    ),
+)
+
+_kraken_sync_status: Column[SyncStatus] = Column(
+    "status",
+    Enum(SyncStatus, name="krakensyncstatus", native_enum=False),
+    nullable=False,
+)
+kraken_sync_runs = Table(
+    "kraken_sync_runs",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column("account_scope", String(64), nullable=False),
+    Column("sync_kind", String(32), nullable=False),
+    _kraken_sync_status,
+    Column("requested_from", UtcDateTime(), nullable=False),
+    Column("requested_to", UtcDateTime(), nullable=False),
+    Column("lookback_seconds", Integer, nullable=False),
+    Column(
+        "previous_success_id",
+        UUID,
+        ForeignKey("kraken_sync_runs.id", ondelete="RESTRICT"),
+    ),
+    Column(
+        "import_session_id", UUID, ForeignKey("import_sessions.id", ondelete="RESTRICT")
+    ),
+    Column(
+        "transformation_run_id",
+        UUID,
+        ForeignKey("transformation_runs.id", ondelete="RESTRICT"),
+    ),
+    Column("started_at", UtcDateTime(), nullable=False),
+    Column("ended_at", UtcDateTime()),
+    Column("fetched_pages", Integer, nullable=False),
+    Column("provider_records", Integer, nullable=False),
+    Column("unique_records", Integer, nullable=False),
+    Column("known_records", Integer, nullable=False),
+    Column("new_raw_records", Integer, nullable=False),
+    Column("new_domain_objects", Integer, nullable=False),
+    Column("review_count", Integer, nullable=False),
+    Column("error_count", Integer, nullable=False),
+    Column("ledger_id_digest", String(64)),
+    Column("error_code", String(128)),
+    Column("error_summary", String(1024)),
+    Column("created_at", UtcDateTime(), nullable=False),
+    CheckConstraint(
+        "requested_to > requested_from AND lookback_seconds > 0",
+        name="ck_kraken_sync_window",
+    ),
+    CheckConstraint(
+        "fetched_pages >= 0 AND provider_records >= 0 AND unique_records >= 0 "
+        "AND known_records >= 0 AND new_raw_records >= 0 "
+        "AND new_domain_objects >= 0 AND review_count >= 0 AND error_count >= 0",
+        name="ck_kraken_sync_counts",
+    ),
+    CheckConstraint(
+        "known_records + new_raw_records = unique_records",
+        name="ck_kraken_sync_classification",
+    ),
+    CheckConstraint(
+        "ledger_id_digest IS NULL OR length(ledger_id_digest) = 64",
+        name="ck_kraken_sync_digest",
+    ),
+    CheckConstraint(
+        "(status = 'PROCESSING' AND ended_at IS NULL AND error_code IS NULL) OR "
+        "(status = 'COMPLETED' AND ended_at IS NOT NULL "
+        "AND ledger_id_digest IS NOT NULL AND error_code IS NULL) OR "
+        "(status = 'FAILED' AND ended_at IS NOT NULL AND error_code IS NOT NULL)",
+        name="ck_kraken_sync_status",
+    ),
+    Index(
+        "ix_kraken_sync_checkpoint",
+        "account_scope",
+        "sync_kind",
+        "status",
+        "requested_to",
+    ),
+    Index(
+        "uq_kraken_sync_active",
+        "account_scope",
+        "sync_kind",
+        unique=True,
+        sqlite_where=text("status = 'PROCESSING'"),
+        postgresql_where=text("status = 'PROCESSING'"),
     ),
 )
 
@@ -972,6 +1059,16 @@ def reject_update(_: Mapper[Any], connection: Any, target: object) -> None:
     raise ValueError("Immutable records cannot be updated.")
 
 
+def protect_terminal_sync(
+    _: Mapper[Any], connection: Any, target: IncrementalSyncRun
+) -> None:
+    del connection
+    history = instance_state(target).attrs.status.history
+    previous = history.deleted[0] if history.deleted else target.status
+    if previous in {SyncStatus.COMPLETED, SyncStatus.FAILED}:
+        raise ValueError("Completed Kraken sync runs are immutable.")
+
+
 def configure_mappings() -> None:
     """Register entities with persistence mappings exactly once."""
     if list(mapper_registry.mappers):
@@ -1011,7 +1108,9 @@ def configure_mappings() -> None:
     mapper_registry.map_imperatively(ValuationRun, valuation_runs)
     mapper_registry.map_imperatively(TaxCalculationRun, tax_calculation_runs)
     mapper_registry.map_imperatively(ExportRun, export_runs)
+    sync_mapper = mapper_registry.map_imperatively(IncrementalSyncRun, kraken_sync_runs)
     mapper_registry.map_imperatively(Sale, sales)
     mapper_registry.map_imperatively(Configuration, configurations)
     for mapper in immutable_mappers:
         event.listen(mapper, "before_update", reject_update)
+    event.listen(sync_mapper, "before_update", protect_terminal_sync)

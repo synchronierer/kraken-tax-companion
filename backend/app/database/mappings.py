@@ -630,6 +630,16 @@ valuation_decisions = Table(
         "AND sample_count >= 0 AND version > 0",
         name="ck_valuation_decision_values",
     ),
+    CheckConstraint(
+        "(gross_quantity IS NULL OR gross_quantity > 0) AND "
+        "(fee_quantity IS NULL OR fee_quantity >= 0) AND "
+        "(net_quantity IS NULL OR net_quantity > 0) AND "
+        "(gross_income_eur IS NULL OR gross_income_eur > 0) AND "
+        "(fee_value_eur IS NULL OR fee_value_eur >= 0) AND "
+        "(net_acquisition_value_eur IS NULL OR "
+        "net_acquisition_value_eur > 0)",
+        name="ck_valuation_reward_components",
+    ),
 )
 
 provider_evidence = Table(
@@ -926,10 +936,16 @@ export_runs = Table(
     Column("period_start", Date, nullable=False),
     Column("period_end", Date, nullable=False),
     Column("rules_fingerprint", String(64), nullable=False),
+    Column("format_version", String(64), nullable=False),
     Column("started_at", UtcDateTime(), nullable=False),
     Column("completed_at", UtcDateTime()),
     Column("error_summary", String(1024)),
-    UniqueConstraint("tax_calculation_run_id", "kind", name="uq_export_run_kind"),
+    UniqueConstraint(
+        "tax_calculation_run_id",
+        "kind",
+        "format_version",
+        name="uq_export_run_format",
+    ),
 )
 
 export_artifacts = Table(

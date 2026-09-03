@@ -1,5 +1,21 @@
 # Steuerliche Exporte
 
+## PDF-Steuerbericht v2
+
+Der serverseitig mit ReportLab erzeugte Bericht `tax-report-pdf-v2` ist ein
+menschenlesbarer Begleitbericht zu den maschinenlesbaren CSV-Nachweisen. Er
+enthält TaxRun-Metadaten, centgerundete Hauptkennzahlen, Asset- und
+Bestandsaggregate, dokumentierte manuelle Gebührenentscheidungen,
+Regelversionen und die drei zentralen exakten Decimalwerte. Die Aggregation
+erfolgt vor dem Renderer mit exakter Decimalarithmetik; der Renderer übernimmt
+nur Layout und Anzeigeformatierung.
+
+`ExportRun.format_version` ist unabhängig von
+`TaxCalculationRun.export_format_version`. Der bestehende TaxRun-Vertrag
+`tax-export-review-decisions-v3` bleibt unverändert. PDF v1 und PDF v2 können
+für denselben TaxRun revisionssicher nebeneinander bestehen. Die CSV-Formate
+bleiben vorerst jeweils auf ihrer v1-Formatversion.
+
 Der Prüffall-CSV-Export enthält ab Format
 `tax-export-review-decisions-v3` neben dem historischen `TaxReviewCase` die
 Bewertungs-ID, den Gebührenwert, offen/entschieden, die effektive Entscheidung,

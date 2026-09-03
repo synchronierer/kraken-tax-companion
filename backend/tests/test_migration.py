@@ -147,6 +147,13 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
     assert "tax_review_decision_id" in {
         column["name"] for column in inspector.get_columns("tax_journal_entries")
     }
+    assert "format_version" in {
+        column["name"] for column in inspector.get_columns("export_runs")
+    }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("export_runs")
+    } == {"uq_export_run_format"}
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM raw_import_records")) == 1
         assert (
@@ -162,6 +169,16 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
     command.upgrade(config, "head")
     command.check(config)
     assert "tax_review_decisions" in inspect(engine).get_table_names()
+
+    command.downgrade(config, "0009_tax_review_decisions")
+    assert "format_version" not in {
+        column["name"] for column in inspect(engine).get_columns("export_runs")
+    }
+    command.upgrade(config, "head")
+    command.check(config)
+    assert "format_version" in {
+        column["name"] for column in inspect(engine).get_columns("export_runs")
+    }
 
     command.downgrade(config, "0007_kraken_ledger_identity")
     assert "gross_income_eur" not in {
@@ -196,4 +213,72 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
     command.upgrade(config, "head")
     command.check(config)
     assert "transformation_runs" in inspect(engine).get_table_names()
+    get_settings.cache_clear()
+
+
+def test_export_format_migration_backfills_legacy_runs(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'export-format.db'}"
+    monkeypatch.setenv("APP_DATABASE_URL", database_url)  # type: ignore[attr-defined]
+    get_settings.cache_clear()
+    config = Config("alembic.ini")
+    command.upgrade(config, "0009_tax_review_decisions")
+    engine = create_engine(database_url)
+    tax_run_id = uuid4().hex
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO tax_calculation_runs "
+                "(id, period_start, period_end, snapshot_hash, rules_fingerprint, "
+                "status, started_at, fifo_rule_version, fee_rule_version, "
+                "classification_rule_version, journal_rule_version, "
+                "export_format_version, checked_events, created_allocations, "
+                "created_journal_entries, review_count, error_count) VALUES "
+                "(:id, '2026-01-01', '2026-12-31', :snapshot, :rules, 'COMPLETED', "
+                ":started, 'fifo-v1', 'fees-v1', 'class-v1', 'journal-v1', "
+                "'tax-export-review-decisions-v3', 0, 0, 0, 0, 0)"
+            ),
+            {
+                "id": tax_run_id,
+                "snapshot": "a" * 64,
+                "rules": "b" * 64,
+                "started": "2026-01-01 00:00:00",
+            },
+        )
+        for index, kind in enumerate(("TAX_REPORT_PDF", "TAX_JOURNAL_CSV")):
+            connection.execute(
+                text(
+                    "INSERT INTO export_runs (id, tax_calculation_run_id, kind, "
+                    "status, period_start, period_end, rules_fingerprint, started_at) "
+                    "VALUES (:id, :run, :kind, 'COMPLETED', '2026-01-01', "
+                    "'2026-12-31', :rules, :started)"
+                ),
+                {
+                    "id": uuid4().hex,
+                    "run": tax_run_id,
+                    "kind": kind,
+                    "rules": "b" * 64,
+                    "started": f"2026-01-01 00:00:0{index}",
+                },
+            )
+    command.upgrade(config, "0010_export_format_version")
+    command.check(config)
+    with engine.connect() as connection:
+        versions = {
+            row["kind"]: row["format_version"]
+            for row in connection.execute(
+                text("SELECT kind, format_version FROM export_runs")
+            ).mappings()
+        }
+    assert versions == {
+        "TAX_REPORT_PDF": "tax-report-pdf-v1",
+        "TAX_JOURNAL_CSV": "tax-journal-csv-v1",
+    }
+    command.downgrade(config, "0009_tax_review_decisions")
+    assert "format_version" not in {
+        column["name"] for column in inspect(engine).get_columns("export_runs")
+    }
+    command.upgrade(config, "0010_export_format_version")
+    command.check(config)
     get_settings.cache_clear()

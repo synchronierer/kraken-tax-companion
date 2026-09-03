@@ -175,6 +175,11 @@ Revision `0006_fifo_tax_journal_exports` ergänzt unveränderliche
 FIFO-Detailnachweise, Steuerjournal und sichere Exportartefakte. Rechen- und
 Exportläufe sind kontrollierte Statushüllen; ihre Detailnachweise bleiben
 append-only.
+Revision `0010_export_format_version` ergänzt eine vom steuerlichen
+Regel-Fingerprint unabhängige Formatversion. Exportartefakte werden über
+TaxRun, Exportart und Formatversion dedupliziert. Der ReportLab-Renderer erhält
+einen voraggregierten `TaxReportData`-Datensatz und kennt weder
+SQLAlchemy-Sessions noch FIFO-Berechnungsdienste.
 
 ## Frontend
 

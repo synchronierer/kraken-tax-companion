@@ -182,3 +182,8 @@ test("staking fee review requires an explicit decision and separate tax run", as
   assert.match(source, /neuer Taxlauf erforderlich/);
   assert.doesNotMatch(source, /tax-review-decisions[\s\S]{0,500}tax-calculations/);
 });
+
+test("export list exposes the independent format version", async () => {
+  const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(source, /"format_version"/);
+});

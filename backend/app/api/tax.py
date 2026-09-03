@@ -17,6 +17,7 @@ from app.core.entities import AuditActorType, AuditEvent
 from app.core.tax import (
     CLASSIFICATION_RULE_VERSION,
     EXPORT_FORMAT_VERSION,
+    EXPORT_FORMAT_VERSIONS,
     FEE_RULE_VERSION,
     FIFO_RULE_VERSION,
     JOURNAL_RULE_VERSION,
@@ -65,6 +66,10 @@ from app.core.valuation import (
 )
 from app.database.session import get_session
 from app.services.tax_exports import (
+    ReportAssetRow,
+    ReportInventoryRow,
+    ReportReviewEvidence,
+    TaxReportData,
     csv_bytes,
     export_extension,
     safe_export_path,
@@ -210,6 +215,7 @@ class ExportItem(BaseModel):
     id: str
     export_run_id: str
     kind: str
+    format_version: str
     status: str
     file_name: str
     media_type: str
@@ -229,6 +235,7 @@ class ExportResponse(BaseModel):
     id: str
     status: str
     kind: str
+    format_version: str
     artifact_id: str
     download_url: str
     duplicate: bool
@@ -1617,16 +1624,135 @@ EXPORT_COLUMNS: dict[ExportKind, tuple[str, ...]] = {
 }
 
 
+def _tax_report_data(
+    db: Session, run: TaxCalculationRun, created_at: datetime
+) -> TaxReportData:
+    valuations = [
+        item
+        for item in _latest_decisions(db).values()
+        if run.period_start <= item.price_date <= run.period_end
+        and item.gross_income_eur is not None
+        and item.net_acquisition_value_eur is not None
+    ]
+    by_asset: dict[str, list[ValuationDecision]] = {}
+    for item in valuations:
+        by_asset.setdefault(item.asset_code, []).append(item)
+    asset_rows = tuple(
+        ReportAssetRow(
+            asset=asset,
+            inflows=len(items),
+            gross_eur=exact_decimal_sum(
+                tuple(item.gross_income_eur or Decimal("0") for item in items)
+            ),
+            fee_eur=exact_decimal_sum(
+                tuple(item.fee_value_eur or Decimal("0") for item in items)
+            ),
+            net_eur=exact_decimal_sum(
+                tuple(item.net_acquisition_value_eur or Decimal("0") for item in items)
+            ),
+        )
+        for asset, items in sorted(by_asset.items())
+    )
+    inventory_by_asset: dict[str, list[InventoryLot]] = {}
+    for item in _list(db, InventoryLot):
+        if item.tax_calculation_run_id == run.id:
+            inventory_by_asset.setdefault(item.asset_code, []).append(item)
+    inventory_rows = tuple(
+        ReportInventoryRow(
+            asset=asset,
+            quantity=exact_decimal_sum(
+                tuple(item.remaining_quantity for item in items)
+            ),
+            cost_eur=exact_decimal_sum(
+                tuple(item.remaining_cost_eur for item in items)
+            ),
+        )
+        for asset, items in sorted(inventory_by_asset.items())
+    )
+    effective = _effective_review_decisions(db)
+    relevant = [
+        (item, effective.get(item.id))
+        for item in valuations
+        if item.fee_tax_classification is FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+    ]
+    included = [
+        (valuation, decision)
+        for valuation, decision in relevant
+        if decision is not None
+        and decision.decision is TaxReviewDecisionValue.INCLUDE_AS_WERBUNGSKOSTEN
+    ]
+    excluded = [
+        decision
+        for _, decision in relevant
+        if decision is not None
+        and decision.decision is TaxReviewDecisionValue.EXCLUDE_FROM_WERBUNGSKOSTEN
+    ]
+    decisions = [decision for _, decision in relevant if decision is not None]
+    review = ReportReviewEvidence(
+        candidates=len(relevant),
+        included=len(included),
+        excluded=len(excluded),
+        open_count=sum(decision is None for _, decision in relevant),
+        included_eur=exact_decimal_sum(
+            tuple(valuation.fee_value_eur or Decimal("0") for valuation, _ in included)
+        ),
+        batch_ids=tuple(sorted({str(item.batch_id) for item in decisions})),
+        versions=tuple(sorted({item.version for item in decisions})),
+        actors=tuple(sorted({item.actor_id for item in decisions})),
+        decided_from=min((item.decided_at for item in decisions), default=None),
+        decided_to=max((item.decided_at for item in decisions), default=None),
+        reasons=tuple(sorted({item.reason for item in decisions})),
+    )
+    gross = exact_decimal_sum(tuple(item.gross_eur for item in asset_rows))
+    net = exact_decimal_sum(tuple(item.net_eur for item in asset_rows))
+    return TaxReportData(
+        run_id=str(run.id),
+        status=run.status.value,
+        period_start=run.period_start,
+        period_end=run.period_end,
+        created_at=created_at,
+        snapshot_hash=run.snapshot_hash,
+        rules_fingerprint=run.rules_fingerprint,
+        rules=TaxRuleVersion(
+            fifo=run.fifo_rule_version,
+            fees=run.fee_rule_version,
+            classification=run.classification_rule_version,
+            journal=run.journal_rule_version,
+            export=run.export_format_version,
+        ),
+        gross_staking_income=gross,
+        staking_fee_included=review.included_eur,
+        reviewed_net_staking_income=net,
+        earn_inflows=sum(item.inflows for item in asset_rows),
+        disposals=sum(
+            1
+            for item in _list(db, DisposalCalculation)
+            if item.tax_calculation_run_id == run.id
+        ),
+        allocations=sum(
+            1
+            for item in _list(db, LotAllocation)
+            if item.tax_calculation_run_id == run.id
+        ),
+        asset_rows=asset_rows,
+        inventory_rows=inventory_rows,
+        review=review,
+    )
+
+
 @router.post("/exports", response_model=ExportResponse)
 def create_export(data: ExportInput, db: Db) -> dict[str, Any]:
     run = db.get(TaxCalculationRun, data.tax_calculation_run_id)
     if run is None:
         raise _not_found("tax_calculation_not_found")
+    format_version = EXPORT_FORMAT_VERSIONS[data.kind]
     existing_run = next(
         (
             item
             for item in _list(db, ExportRun)
-            if item.tax_calculation_run_id == run.id and item.kind == data.kind
+            if item.tax_calculation_run_id == run.id
+            and item.kind == data.kind
+            and item.format_version == format_version
         ),
         None,
     )
@@ -1645,26 +1771,19 @@ def create_export(data: ExportInput, db: Db) -> dict[str, Any]:
         period_start=run.period_start,
         period_end=run.period_end,
         rules_fingerprint=run.rules_fingerprint,
+        format_version=format_version,
         started_at=now,
     )
     extension, media_type = export_extension(data.kind)
-    file_name = f"tax-export-{uuid4().hex}.{extension}"
+    file_name = (
+        f"kraken-tax-report-{run.period_start.year}-{uuid4().hex}.pdf"
+        if data.kind == ExportKind.TAX_REPORT_PDF
+        else f"tax-export-{uuid4().hex}.{extension}"
+    )
     target = safe_export_path(Path(get_settings().export_directory), file_name)
     target.parent.mkdir(parents=True, exist_ok=True)
     if data.kind == ExportKind.TAX_REPORT_PDF:
-        content = tax_report_pdf(
-            period_start=run.period_start,
-            period_end=run.period_end,
-            created_at=now,
-            rules=TaxRuleVersion(
-                fifo=run.fifo_rule_version,
-                fees=run.fee_rule_version,
-                classification=run.classification_rule_version,
-                journal=run.journal_rule_version,
-                export=run.export_format_version,
-            ),
-            summary=tax_summary(db, run.period_start.year),
-        )
+        content = tax_report_pdf(_tax_report_data(db, run, now))
     else:
         rows = _export_rows(data.kind, db, run)
         content = csv_bytes(EXPORT_COLUMNS[data.kind], rows)
@@ -1691,6 +1810,7 @@ def create_export(data: ExportInput, db: Db) -> dict[str, Any]:
             actor_id="tax-export",
             metadata={
                 "kind": data.kind.value,
+                "format_version": format_version,
                 "artifact_id": str(artifact.id),
                 "sha256": artifact.sha256_hash,
                 "size_bytes": artifact.size_bytes,
@@ -1807,6 +1927,7 @@ def _export_response(
         "id": str(run.id),
         "status": run.status.value,
         "kind": run.kind.value,
+        "format_version": run.format_version,
         "artifact_id": str(artifact.id),
         "download_url": f"/api/exports/{artifact.id}/download",
         "duplicate": duplicate,
@@ -1823,6 +1944,7 @@ def export_list(
             "id": str(item.id),
             "export_run_id": str(item.export_run_id),
             "kind": item.kind.value,
+            "format_version": runs[item.export_run_id].format_version,
             "status": runs[item.export_run_id].status.value,
             "file_name": item.file_name,
             "media_type": item.media_type,
@@ -1847,6 +1969,7 @@ def export_detail(item_id: UUID, db: Db) -> dict[str, Any]:
         "id": str(item.id),
         "export_run_id": str(item.export_run_id),
         "kind": item.kind.value,
+        "format_version": run.format_version if run else "unknown",
         "status": run.status.value if run else "unknown",
         "file_name": item.file_name,
         "media_type": item.media_type,

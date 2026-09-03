@@ -72,6 +72,17 @@ class ExportStatus(StrEnum):
     FAILED = "failed"
 
 
+EXPORT_FORMAT_VERSIONS: Final[dict[ExportKind, str]] = {
+    ExportKind.TAX_JOURNAL_CSV: "tax-journal-csv-v1",
+    ExportKind.FIFO_ALLOCATIONS_CSV: "fifo-allocations-csv-v1",
+    ExportKind.INVENTORY_CSV: "inventory-csv-v1",
+    ExportKind.VALUATION_EVIDENCE_CSV: "valuation-evidence-csv-v1",
+    ExportKind.REVIEWS_CSV: "reviews-csv-v1",
+    ExportKind.ANNUAL_SUMMARY_CSV: "annual-summary-csv-v1",
+    ExportKind.TAX_REPORT_PDF: "tax-report-pdf-v2",
+}
+
+
 @dataclass(frozen=True, kw_only=True)
 class TaxRuleVersion:
     fifo: str = FIFO_RULE_VERSION
@@ -415,6 +426,7 @@ class ExportRun:
     period_start: date
     period_end: date
     rules_fingerprint: str
+    format_version: str
     started_at: datetime
     id: UUID = field(default_factory=new_id)
     completed_at: datetime | None = None
@@ -425,6 +437,7 @@ class ExportRun:
         self.rules_fingerprint = required_text(
             self.rules_fingerprint, "rules_fingerprint"
         )
+        self.format_version = required_text(self.format_version, "format_version")
         self.started_at = require_utc(self.started_at)
         if self.completed_at is not None:
             self.completed_at = require_utc(self.completed_at)

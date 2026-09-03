@@ -1,13 +1,16 @@
+import io
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Context, Decimal, getcontext, localcontext
+from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
+from pypdf import PdfReader
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -16,6 +19,7 @@ from app.api.tax import _dict_list
 from app.config.settings import get_settings
 from app.core.entities import AuditEvent
 from app.core.tax import (
+    EXPORT_FORMAT_VERSIONS,
     AcquisitionInput,
     DisposalCalculation,
     DisposalInput,
@@ -64,6 +68,11 @@ from app.database.base import Base
 from app.database.session import get_session
 from app.main import app
 from app.services.tax_exports import (
+    PDF_REPORT_VERSION,
+    ReportAssetRow,
+    ReportInventoryRow,
+    ReportReviewEvidence,
+    TaxReportData,
     csv_bytes,
     export_extension,
     safe_export_path,
@@ -447,15 +456,106 @@ def test_csv_pdf_and_export_path_contract(tmp_path: Path) -> None:
     assert content.decode() == (
         "id;amount;occurred_at\nä;1.2300;2026-07-30T12:00:00+00:00\n"
     )
-    report = tax_report_pdf(
-        period_start=date(2026, 1, 1),
-        period_end=date(2026, 12, 31),
-        created_at=NOW,
-        rules=TaxRuleVersion(),
-        summary={"realized_gains": "10", "net_result": "10"},
+    run_id = str(uuid4())
+    reason = (
+        "Von Kraken unmittelbar von der jeweiligen Staking-Prämie einbehaltene "
+        "Plattformprovision; Höhe anhand der dokumentierten Brutto-, Gebühren- "
+        "und Netto-Reward-Komponenten nachvollzogen."
     )
-    assert report.startswith(b"%PDF-1.4")
-    assert report.endswith(b"%%EOF\n")
+    report = tax_report_pdf(
+        TaxReportData(
+            run_id=run_id,
+            status="completed",
+            period_start=date(2026, 1, 1),
+            period_end=date(2026, 12, 31),
+            created_at=NOW,
+            snapshot_hash="a" * 64,
+            rules_fingerprint="b" * 64,
+            rules=TaxRuleVersion(),
+            gross_staking_income=Decimal("51.586220962002859504121206557501435344829"),
+            staking_fee_included=Decimal("11.964719979423988667047664309258439466617"),
+            reviewed_net_staking_income=Decimal(
+                "39.621500982578870837073542248242995878212"
+            ),
+            earn_inflows=55,
+            disposals=0,
+            allocations=0,
+            asset_rows=tuple(
+                ReportAssetRow(
+                    asset=asset,
+                    inflows=1,
+                    gross_eur=Decimal("0.0000001") if asset == "BTC" else Decimal("1"),
+                    fee_eur=Decimal("0") if asset == "BTC" else Decimal("0.1"),
+                    net_eur=Decimal("0.0000001") if asset == "BTC" else Decimal("0.9"),
+                )
+                for asset in (
+                    "ADA",
+                    "ATOM",
+                    "BTC",
+                    "DOT",
+                    "EIGEN",
+                    "ETH",
+                    "GRT",
+                    "KAVA",
+                    "XTZ",
+                )
+            ),
+            inventory_rows=(
+                ReportInventoryRow(
+                    asset="BTC",
+                    quantity=Decimal("0.00000001"),
+                    cost_eur=Decimal("0.0000001"),
+                ),
+                ReportInventoryRow(
+                    asset="KAVA",
+                    quantity=Decimal("39.6215"),
+                    cost_eur=Decimal("39.621500982578870837073542248242995878212"),
+                ),
+            ),
+            review=ReportReviewEvidence(
+                candidates=48,
+                included=48,
+                excluded=0,
+                open_count=0,
+                included_eur=Decimal("11.964719979423988667047664309258439466617"),
+                batch_ids=(str(uuid4()),),
+                versions=(1,),
+                actors=("local-user",),
+                decided_from=NOW,
+                decided_to=NOW,
+                reasons=(reason,),
+            ),
+        )
+    )
+    assert report.startswith(b"%PDF-")
+    reader = PdfReader(io.BytesIO(report))
+    assert 3 <= len(reader.pages) <= 4
+    page_texts = [page.extract_text() or "" for page in reader.pages]
+    for page_number, page_text in enumerate(page_texts, start=1):
+        assert f"Seite {page_number} von {len(page_texts)}" in page_text
+    text = " ".join("\n".join(page_texts).split())
+    for expected in (
+        "Steuerliche Arbeitsdokumentation 2026",
+        run_id,
+        "COMPLETED",
+        PDF_REPORT_VERSION,
+        "51,59 €",
+        "11,96 €",
+        "39,62 €",
+        "55 Earn-Zuflüsse",
+        "48 manuell geprüfte Plattformgebühren",
+        reason,
+        "fifo-utc-stable-v1",
+        "proportional-last-remainder-v1",
+        "keine erfassten Veräußerungen",
+        "keine FIFO-Zuordnungen erforderlich",
+        "Bestandsübersicht",
+        "keine Steuerberatung",
+        "Gebührenregel",
+        "Prüfung der Staking-Plattformgebühren",
+        "Seite 1 von",
+    ):
+        assert expected in text
     assert safe_export_path(tmp_path, "report.csv") == tmp_path / "report.csv"
     for unsafe in ("../report.csv", "/tmp/report.csv", "", "."):
         with pytest.raises(ValueError, match="safe base name"):
@@ -680,6 +780,105 @@ def _second_historical_tax_run(database: Session, first_run_id: UUID) -> UUID:
     database.add(second_run)
     database.flush()
     return second_run.id
+
+
+def test_export_format_versions_preserve_legacy_pdf_and_domain_records(
+    tax_review_client: tuple[TestClient, sessionmaker[Session]], tmp_path: Path
+) -> None:
+    client, sessions = tax_review_client
+    legacy_content = b"%PDF-1.4\nlegacy-v1\n%%EOF\n"
+    legacy_name = "legacy-tax-report-v1.pdf"
+    (tmp_path / legacy_name).write_bytes(legacy_content)
+    with sessions() as database:
+        tax_run = database.scalars(select(TaxCalculationRun)).first()
+        assert tax_run is not None
+        legacy_run = ExportRun(
+            tax_calculation_run_id=tax_run.id,
+            kind=ExportKind.TAX_REPORT_PDF,
+            status=ExportStatus.COMPLETED,
+            period_start=tax_run.period_start,
+            period_end=tax_run.period_end,
+            rules_fingerprint=tax_run.rules_fingerprint,
+            format_version="tax-report-pdf-v1",
+            started_at=NOW,
+            completed_at=NOW,
+        )
+        legacy_artifact = ExportArtifact(
+            export_run_id=legacy_run.id,
+            kind=ExportKind.TAX_REPORT_PDF,
+            file_name=legacy_name,
+            media_type="application/pdf",
+            size_bytes=len(legacy_content),
+            sha256_hash=sha256(legacy_content).hexdigest(),
+            created_at=NOW,
+        )
+        database.add_all((legacy_run, legacy_artifact))
+        database.commit()
+        before = {
+            "runs": database.scalar(
+                select(func.count()).select_from(TaxCalculationRun)
+            ),
+            "decisions": database.scalar(
+                select(func.count()).select_from(TaxReviewDecision)
+            ),
+            "journal": database.scalar(
+                select(func.count()).select_from(TaxJournalEntry)
+            ),
+            "inventory": database.scalar(
+                select(func.count()).select_from(InventoryLot)
+            ),
+        }
+
+    request = {"tax_calculation_run_id": str(tax_run.id), "kind": "tax_report_pdf"}
+    created = client.post("/api/exports", json=request)
+    assert created.status_code == 200
+    assert created.json()["duplicate"] is False
+    assert created.json()["format_version"] == "tax-report-pdf-v2"
+    assert created.json()["artifact_id"] != str(legacy_artifact.id)
+    duplicate = client.post("/api/exports", json=request)
+    assert duplicate.status_code == 200
+    assert duplicate.json()["duplicate"] is True
+    assert duplicate.json()["artifact_id"] == created.json()["artifact_id"]
+    old_download = client.get(f"/api/exports/{legacy_artifact.id}/download")
+    assert old_download.content == legacy_content
+
+    csv_request = {
+        "tax_calculation_run_id": str(tax_run.id),
+        "kind": "tax_journal_csv",
+    }
+    first_csv = client.post("/api/exports", json=csv_request).json()
+    assert first_csv["format_version"] == "tax-journal-csv-v1"
+    second_csv = client.post("/api/exports", json=csv_request).json()
+    assert second_csv["duplicate"] is True
+    assert second_csv["artifact_id"] == first_csv["artifact_id"]
+    listing = client.get("/api/exports?year=2026").json()
+    assert {item["format_version"] for item in listing["items"]} >= {
+        "tax-report-pdf-v1",
+        "tax-report-pdf-v2",
+        "tax-journal-csv-v1",
+    }
+    detail = client.get(f"/api/exports/{created.json()['artifact_id']}").json()
+    assert detail["format_version"] == "tax-report-pdf-v2"
+    with sessions() as database:
+        after = {
+            "runs": database.scalar(
+                select(func.count()).select_from(TaxCalculationRun)
+            ),
+            "decisions": database.scalar(
+                select(func.count()).select_from(TaxReviewDecision)
+            ),
+            "journal": database.scalar(
+                select(func.count()).select_from(TaxJournalEntry)
+            ),
+            "inventory": database.scalar(
+                select(func.count()).select_from(InventoryLot)
+            ),
+        }
+        assert after == before
+        assert (
+            database.get(ExportArtifact, legacy_artifact.id).sha256_hash
+            == sha256(legacy_content).hexdigest()
+        )
 
 
 def test_tax_review_domain_decision_reference_invariants() -> None:
@@ -1531,10 +1730,22 @@ def test_export_entities_reject_unsafe_names() -> None:
         period_start=date(2026, 1, 1),
         period_end=date(2026, 12, 31),
         rules_fingerprint="a" * 64,
+        format_version="tax-journal-csv-v1",
         started_at=NOW,
         completed_at=NOW + timedelta(seconds=1),
     )
     assert export_run.completed_at == NOW + timedelta(seconds=1)
+    assert EXPORT_FORMAT_VERSIONS == {
+        ExportKind.TAX_JOURNAL_CSV: "tax-journal-csv-v1",
+        ExportKind.FIFO_ALLOCATIONS_CSV: "fifo-allocations-csv-v1",
+        ExportKind.INVENTORY_CSV: "inventory-csv-v1",
+        ExportKind.VALUATION_EVIDENCE_CSV: "valuation-evidence-csv-v1",
+        ExportKind.REVIEWS_CSV: "reviews-csv-v1",
+        ExportKind.ANNUAL_SUMMARY_CSV: "annual-summary-csv-v1",
+        ExportKind.TAX_REPORT_PDF: "tax-report-pdf-v2",
+    }
+    with pytest.raises(ValueError, match="format_version"):
+        replace(export_run, format_version="")
     with pytest.raises(ValueError, match="safe base name"):
         ExportArtifact(
             export_run_id=export_run.id,

@@ -56,7 +56,6 @@ from app.core.valuation import (
     evidence_hash,
     exact_decimal_sum,
     transition_valuation_run,
-    utc_day_bounds,
 )
 from app.database.dashboard_queries import SqlAlchemyDashboardQueries
 from app.database.session import get_session
@@ -64,6 +63,7 @@ from app.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.imports.service import ImportService
 from app.imports.validation import RequiredFieldsValidator
 from app.infrastructure.coingecko import MAPPING_VERSION, CoinGeckoProvider
+from app.services.valuation_fetch import plan_fetches, prefetch
 
 router = APIRouter(prefix="/api", tags=["workflows"])
 Db = Annotated[Session, Depends(get_session)]
@@ -1037,8 +1037,44 @@ def valuations(
         mode=settings.coingecko_api_mode,
         api_key=settings.coingecko_api_key,
         timeout_seconds=settings.coingecko_timeout_seconds,
+        min_interval_seconds=settings.coingecko_min_interval_seconds,
+        rate_limit_retry_base_seconds=settings.coingecko_rate_limit_retry_base_seconds,
     )
-    cache: dict[tuple[str, date], DailyPrice] = {}
+    fetchable: list[ValuationRequirement] = []
+    for requirement in pending:
+        model = VALUABLE_DOMAIN_MODELS.get(requirement.domain_object_type)
+        domain_item = db.get(model, requirement.domain_object_id) if model else None
+        if domain_item is None:
+            continue
+        if isinstance(domain_item, AcquisitionLot) and domain_item.acquisition_type in {
+            AcquisitionType.STAKING_REWARD,
+            AcquisitionType.LEGACY_STAKING_REWARD,
+        }:
+            try:
+                calculate_reward_valuation(
+                    net_quantity=domain_item.quantity,
+                    gross_quantity=domain_item.gross_quantity,
+                    fee_quantity=domain_item.fee_quantity,
+                    asset_code=domain_item.asset_code,
+                    fee_asset=domain_item.fee_asset,
+                    unit_price_eur=Decimal("1"),
+                    method_version=method_version,
+                )
+            except RewardValuationError:
+                continue
+        fetchable.append(requirement)
+    plans = plan_fetches(
+        fetchable,
+        list_entities(db, DailyPrice),
+        provider,
+        refresh_prices=refresh_prices,
+    )
+    batches = prefetch(plans, provider, db, audit=audit)
+    cache: dict[tuple[str, date], DailyPrice] = {
+        (price.asset_code, price.price_date): price
+        for plan in plans
+        for price in plan.existing_prices
+    }
     transition_valuation_run(run, ValuationRunStatus.APPLYING, now)
     for requirement in pending:
         model = VALUABLE_DOMAIN_MODELS.get(requirement.domain_object_type)
@@ -1137,11 +1173,6 @@ def valuations(
                         for item in list_entities(db, DailyPrice)
                         if item.asset_code == key[0] and item.price_date == key[1]
                     ]
-                    manual = [
-                        item
-                        for item in candidate_prices
-                        if item.method == PriceMethod.MANUAL_DAILY_PRICE
-                    ]
                     automatic = [
                         item
                         for item in candidate_prices
@@ -1149,155 +1180,81 @@ def valuations(
                         and item.provider == provider.name
                         and item.provider_contract_version == provider.contract_version
                     ]
-                    if manual:
-                        daily = max(manual, key=lambda item: item.version)
-                    elif automatic and not refresh_prices:
-                        daily = max(automatic, key=lambda item: item.version)
-                    else:
-                        start, end = utc_day_bounds(key[1])
+                    batch = batches[key]
+                    if isinstance(batch, PriceProviderError):
+                        raise batch
+                    observations = batch.observations
+                    provider_evidence = batch.evidence
+                    observation_hash = evidence_hash(observations)
+                    identical = next(
+                        (
+                            item
+                            for item in automatic
+                            if item.evidence_hash == observation_hash
+                        ),
+                        None,
+                    )
+                    if identical:
+                        daily = identical
                         audit(
-                            "valuation.provider_fetch_started",
-                            {"asset": key[0], "date": str(key[1])},
-                        )
-                        observations = provider.observations(key[0], "EUR", start, end)
-                        if not observations:
-                            raise PriceProviderError(
-                                "valuation_no_price_data",
-                                "Keine historischen Kursdaten vorhanden.",
-                            )
-                        audit(
-                            "valuation.provider_fetch_succeeded",
-                            {"asset": key[0], "observations": len(observations)},
-                        )
-                        normalized = [
+                            "valuation.duplicate_detected",
                             {
-                                "observed_at": x.observed_at.isoformat(),
-                                "price_eur": str(x.price_eur),
-                            }
-                            for x in observations
-                        ]
-                        observation_hash = evidence_hash(observations)
-                        identical = next(
-                            (
-                                item
-                                for item in automatic
-                                if item.evidence_hash == observation_hash
-                            ),
-                            None,
+                                "daily_price_id": str(daily.id),
+                                "kind": "provider_evidence",
+                            },
                         )
-                        if identical:
-                            daily = identical
+                    else:
+                        average, decision_status, reason = daily_average(
+                            observations, key[1], now=now
+                        )
+                        previous_automatic = (
+                            max(automatic, key=lambda item: item.version)
+                            if automatic
+                            else None
+                        )
+                        daily = DailyPrice(
+                            asset_code=key[0],
+                            price_date=key[1],
+                            unit_price_eur=average,
+                            method=PriceMethod.DAILY_AVERAGE_HOURLY,
+                            source="CoinGecko Market Chart Range",
+                            provider=provider.name,
+                            provider_contract_version=(provider.contract_version),
+                            evidence_hash=observation_hash,
+                            sample_count=len(observations),
+                            earliest_sample_at=min(x.observed_at for x in observations),
+                            latest_sample_at=max(x.observed_at for x in observations),
+                            minimum_price_eur=min(x.price_eur for x in observations),
+                            maximum_price_eur=max(x.price_eur for x in observations),
+                            fetched_at=now,
+                            status=decision_status,
+                            version=(
+                                previous_automatic.version + 1
+                                if previous_automatic
+                                else 1
+                            ),
+                            supersedes_id=(
+                                previous_automatic.id if previous_automatic else None
+                            ),
+                            provider_evidence_id=provider_evidence.id,
+                        )
+                        db.add(daily)
+                        db.flush()
+                        audit(
+                            "valuation.daily_price_created",
+                            {"daily_price_id": str(daily.id)},
+                        )
+                        if previous_automatic:
                             audit(
-                                "valuation.duplicate_detected",
+                                "valuation.conflict_detected",
                                 {
-                                    "daily_price_id": str(daily.id),
-                                    "kind": "provider_evidence",
+                                    "previous_daily_price_id": str(
+                                        previous_automatic.id
+                                    ),
+                                    "new_daily_price_id": str(daily.id),
+                                    "reason": "provider_evidence_changed",
                                 },
                             )
-                        else:
-                            evidence_candidates = [
-                                item
-                                for item in list_entities(db, ProviderEvidence)
-                                if item.provider == provider.name
-                                and item.provider_contract_version
-                                == provider.contract_version
-                                and item.provider_asset_id == provider.asset_id(key[0])
-                                and item.target_currency == "EUR"
-                                and item.requested_from == start
-                                and item.requested_to == end
-                                and item.response_hash == observation_hash
-                            ]
-                            if evidence_candidates:
-                                provider_evidence = evidence_candidates[0]
-                            else:
-                                provider_evidence = ProviderEvidence(
-                                    provider=provider.name,
-                                    provider_contract_version=(
-                                        provider.contract_version
-                                    ),
-                                    provider_asset_id=provider.asset_id(key[0]),
-                                    target_currency="EUR",
-                                    requested_from=start,
-                                    requested_to=end,
-                                    fetched_at=now,
-                                    http_status=200,
-                                    response_hash=observation_hash,
-                                    observation_count=len(observations),
-                                    observations=normalized,
-                                    earliest_observed_at=min(
-                                        x.observed_at for x in observations
-                                    ),
-                                    latest_observed_at=max(
-                                        x.observed_at for x in observations
-                                    ),
-                                )
-                                db.add(provider_evidence)
-                                db.flush()
-                                audit(
-                                    "valuation.provider_evidence_stored",
-                                    {"evidence_id": str(provider_evidence.id)},
-                                )
-                            average, decision_status, reason = daily_average(
-                                observations, key[1], now=now
-                            )
-                            previous_automatic = (
-                                max(automatic, key=lambda item: item.version)
-                                if automatic
-                                else None
-                            )
-                            daily = DailyPrice(
-                                asset_code=key[0],
-                                price_date=key[1],
-                                unit_price_eur=average,
-                                method=PriceMethod.DAILY_AVERAGE_HOURLY,
-                                source="CoinGecko Market Chart Range",
-                                provider=provider.name,
-                                provider_contract_version=(provider.contract_version),
-                                evidence_hash=observation_hash,
-                                sample_count=len(observations),
-                                earliest_sample_at=min(
-                                    x.observed_at for x in observations
-                                ),
-                                latest_sample_at=max(
-                                    x.observed_at for x in observations
-                                ),
-                                minimum_price_eur=min(
-                                    x.price_eur for x in observations
-                                ),
-                                maximum_price_eur=max(
-                                    x.price_eur for x in observations
-                                ),
-                                fetched_at=now,
-                                status=decision_status,
-                                version=(
-                                    previous_automatic.version + 1
-                                    if previous_automatic
-                                    else 1
-                                ),
-                                supersedes_id=(
-                                    previous_automatic.id
-                                    if previous_automatic
-                                    else None
-                                ),
-                                provider_evidence_id=provider_evidence.id,
-                            )
-                            db.add(daily)
-                            db.flush()
-                            audit(
-                                "valuation.daily_price_created",
-                                {"daily_price_id": str(daily.id)},
-                            )
-                            if previous_automatic:
-                                audit(
-                                    "valuation.conflict_detected",
-                                    {
-                                        "previous_daily_price_id": str(
-                                            previous_automatic.id
-                                        ),
-                                        "new_daily_price_id": str(daily.id),
-                                        "reason": "provider_evidence_changed",
-                                    },
-                                )
                     cache[key] = daily
                 unit = daily.unit_price_eur
                 method = daily.method

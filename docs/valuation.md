@@ -66,7 +66,7 @@ Vorrang, ohne vorhandene automatische Evidenz zu löschen.
 CoinGecko-Abrufe werden in höchstens 90 Tage große Fenster geteilt. Der
 persistente Tagespreis-Cache verhindert unnötige Wiederholungen. Bewusst
 erneut geladene, abweichende Evidenz wird als neue Version und Konflikt
-auditiert; identische Evidenz erzeugt keinen zweiten Nachweis.
+auditiert; identische Tagesdaten erzeugen keinen zweiten DailyPrice.
 Die Domain definiert ausschließlich die providerneutrale Berechnungs- und
 Methodenversion. Providername, Asset-Mappingversion und die konkrete
 Provider-Vertragsversion liegen im Infrastructure-Adapter und werden erst mit
@@ -147,3 +147,72 @@ der reproduzierte CoinGecko-Kurs und seine Reward-Produkte, passen nicht
 verlustfrei in diesen Vertrag. Diese getrennte Persistenzfrage erfordert vor
 einem PostgreSQL-Produktiveinsatz eine eigene Schemaentscheidung; der
 vorliegende reine Arithmetikfix ändert keine Migration oder Spalte.
+
+## Sprint 4A.3: Batch-Fetch und Rate-Limits
+
+Vor dem Requirement-Loop plant `valuation_fetch.plan_fetches` nur die für
+`method_version` noch offenen, fachlich bewertbaren Anforderungen.
+`DIRECT_EUR` benötigt keinen Provider. Pro Asset werden erforderliche,
+bereits abgedeckte und fehlende UTC-Tage sowie Providerfenster ermittelt.
+Mehrere Requirements desselben Asset/Tages teilen einen DailyPrice.
+
+Fehlende Tage werden pro Asset vom frühesten bis zum spätesten Tag in
+zusammenhängende Fenster von maximal 90 Tagen aufgeteilt. Die Fenster liegen
+an UTC-Mitternacht und verwenden `[start, end)`. Das nächste Fenster beginnt
+exakt am Ende des vorherigen. Inklusive Provider-Endpunkte werden lokal auf
+diese Intervalle normalisiert; der Grenzzeitpunkt gehört zum Folgefenster.
+Doppelte Timestamps innerhalb eines Fensters verwenden deterministisch den
+letzten gelieferten Wert. Auch Tage zwischen den benötigten Tagen können im
+Fetch enthalten sein; nur benötigte Tage erhalten einen DailyPrice.
+
+Der neue Providervertrag heißt `market-chart-range-hourly-v2`; die URL wird
+mit `urlencode` und explizitem `interval=hourly` erzeugt. Das Asset-Mapping
+`coingecko-asset-map-v2` und die Methode `eur-valuation-v2` bleiben erhalten.
+Alte Verträge sind keine Cache-Treffer für den neuen Vertrag. Historische
+DailyPrices und ProviderEvidence werden weder migriert noch umgeschrieben.
+
+Jede HTTP-Antwort erhält einen ProviderEvidence-Nachweis mit tatsächlichem
+Fenster, Fetch-Zeitpunkt, HTTP-Status und normalisierten Beobachtungen.
+Auch fehlgeschlagene HTTP-Versuche vor einem erfolgreichen Retry bleiben als
+Nachweise mit ihrem Status und leerer Observation-Liste erhalten.
+Netzwerkfehler ohne HTTP-Antwort erhalten keinen erfundenen HTTP-Status.
+`response_hash` bezeichnet weiterhin den deterministischen Hash der
+normalisierten Beobachtungen, nicht einen Hash der rohen HTTP-Bytes.
+Ein erneuter Fetch erzeugt einen eigenen Nachweis; identische Tagesdaten
+verwenden weiterhin denselben DailyPrice.
+
+Mehrere DailyPrices dürfen dieselbe erfolgreiche Batch-Evidence referenzieren.
+Ihr `evidence_hash`, Sample-Anzahl, Extrema und Zeitgrenzen verwenden jedoch
+nur die Beobachtungen ihres eigenen UTC-Kalendertags. Weder lokale Zeit noch
+angrenzende Tage fließen in die Mittelwertberechnung ein.
+
+Manuelle Tagespreise haben auch bei `refresh_prices=true` Vorrang.
+Ohne Refresh werden passende automatische Tagespreise wiederverwendet.
+Refresh betrifft weiterhin nur tatsächlich offene Requirements; er umgeht
+keine Methodenversion-Idempotenz. Abweichende Tagesdaten erzeugen wie bisher
+eine neue DailyPrice-Version mit `supersedes_id`; identische Tagesdaten nicht.
+
+Ein ValuationRun verwendet genau ein Providerobjekt für sämtliche Assets,
+Fenster und Retries. Die neuen Einstellungen lauten:
+
+- `APP_COINGECKO_MIN_INTERVAL_SECONDS=2.1`: positiver Mindestabstand zwischen
+  Requeststarts, maximal 300 Sekunden; monotone, injizierbare Uhr und Sleeper.
+  Der erste Request wartet nicht, danach wird nur die Restzeit gewartet.
+- `APP_COINGECKO_RATE_LIMIT_RETRY_BASE_SECONDS=30`: Basis zwischen 30 und
+  3600 Sekunden. HTTP 429 wartet exponentiell mindestens 30/60 Sekunden bei
+  den standardmäßig zwei Retries. `Retry-After` kann diese Pause verlängern,
+  niemals verkürzen. Sekunden und HTTP-Date werden unterstützt; ungültige
+  Werte und Werte über sieben Tagen fallen auf den sicheren Backoff zurück.
+
+Timeout, URLError und HTTP 5xx behalten den kurzen normalen Backoff;
+Request-Pacing gilt zusätzlich. Ausgeschöpfte 429-Retries behalten
+`valuation_provider_rate_limited` und `temporary=true`.
+
+`daily_average()` und `MINIMUM_HOURLY_SAMPLES` bleiben unverändert. Ein
+abgeschlossener Tag mit zu wenigen Samples bleibt `REVIEW_REQUIRED`.
+Der aktuelle oder ein zukünftiger UTC-Tag wird weiterhin mit
+`valuation_future_date` zur Prüfung gestellt, selbst bei vielen Samples.
+Es gibt keine Interpolation, Hochrechnung oder künstlichen Samples.
+Reward-Mengen, Decimal-Produkte und Fee-Klassifizierungen ändern sich nicht.
+
+Die Bewertung startet keine Steuerberechnung, kein FIFO und keinen Export.

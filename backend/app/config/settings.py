@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     coingecko_api_key: str | None = None
     coingecko_api_mode: str = "disabled"
     coingecko_timeout_seconds: int = 15
+    coingecko_min_interval_seconds: float = Field(default=2.1, gt=0, le=300)
+    coingecko_rate_limit_retry_base_seconds: float = Field(default=30, ge=30, le=3600)
     kraken_api_key: str | None = None
     kraken_api_secret: str | None = None
     kraken_api_base_url: str = "https://api.kraken.com"

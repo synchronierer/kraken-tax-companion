@@ -491,6 +491,11 @@ class Response:
         return json.dumps(self.payload).encode()
 
 
+@pytest.fixture(autouse=True)
+def no_coingecko_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(coingecko.time, "sleep", lambda _: None)
+
+
 def provider(mode: str = "keyless", key: str | None = None) -> CoinGeckoProvider:
     return CoinGeckoProvider(
         base_url="https://prices.invalid",
@@ -656,12 +661,12 @@ def test_coingecko_windows_timeout_and_retry_after(
     assert result == ()
     assert len(requested) == 3
     assert CoinGeckoProvider._retry_delay(2, None) == 4
-    assert CoinGeckoProvider._retry_delay(0, "31") == 30
+    assert CoinGeckoProvider._retry_delay(0, "31") == 31
     assert CoinGeckoProvider._retry_delay(0, "not-a-date") == 1
     future_naive = (datetime.now(UTC) + timedelta(minutes=1)).strftime(
         "%a, %d %b %Y %H:%M:%S"
     )
-    assert 0 < CoinGeckoProvider._retry_delay(0, future_naive) <= 30
+    assert 0 < CoinGeckoProvider._retry_delay(0, future_naive) <= 60
 
     calls = 0
 
@@ -1670,7 +1675,7 @@ def test_unexpected_reward_decision_error_rolls_back_valuation_transaction(
         assert database.scalar(select(func.count()).select_from(AuditEvent)) == 0
 
 
-def test_existing_provider_evidence_is_reused(
+def test_old_provider_evidence_remains_historical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = create_engine(
@@ -1742,7 +1747,11 @@ def test_existing_provider_evidence_is_reused(
             assert run.json()["resolved"] == 1
             price = local_client.get("/api/prices").json()["items"][0]
             detail = local_client.get(f"/api/prices/{price['id']}").json()
-            assert detail["provider_evidence"]["id"] == str(existing_evidence.id)
+            assert detail["provider_evidence"]["id"] != str(existing_evidence.id)
+            with sessions() as database:
+                historical = database.get(ProviderEvidence, existing_evidence.id)
+                assert historical is not None
+                assert historical.provider_contract_version == "market-chart-range-v1"
             assert detail["provider_evidence"]["asset_id"] == "ethereum"
     finally:
         settings.coingecko_api_mode = previous_mode

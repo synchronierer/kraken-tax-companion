@@ -26,7 +26,7 @@ from app.core.entities import (
     RawImportRecord,
 )
 from app.core.identifiers import new_id
-from app.core.tax import InventoryLot, TaxCalculationRun
+from app.core.tax import ExportRun, InventoryLot, TaxCalculationRun, TaxReviewDecision
 from app.core.transformation import (
     AcquisitionLot,
     DecisionType,
@@ -37,12 +37,13 @@ from app.core.transformation import (
     ReconciliationStatus,
     TradeExecution,
     TransformationDecision,
+    TransformationIssue,
     TransformationRun,
     TransformationStatus,
     ValuationRequirement,
     non_negative_decimal,
 )
-from app.core.valuation import ValuationDecision
+from app.core.valuation import ValuationDecision, ValuationRun
 from app.database.base import Base
 from app.database.mappings import transformation_decisions
 from app.database.unit_of_work import SqlAlchemyUnitOfWork
@@ -646,6 +647,26 @@ def test_unsupported_source_and_unknown_group_asset_still_get_decisions() -> Non
     result = transform(factory, generic_session, grouped_session)
     assert result.checked_records == 3
     assert result.review_cases == 1
+    with factory() as database:
+        decision = database.scalar(
+            select(TransformationDecision).where(
+                TransformationDecision.import_session_id == generic_session
+            )
+        )
+        assert decision is not None
+        assert decision.decision_type is DecisionType.UNSUPPORTED
+        assert decision.reason_code == "source_unsupported"
+        assert (
+            database.scalar(
+                select(func.count())
+                .select_from(TransformationIssue)
+                .where(
+                    TransformationIssue.raw_import_record_id
+                    == decision.raw_import_record_id
+                )
+            )
+            == 0
+        )
 
 
 class CommitFailingUnitOfWork(SqlAlchemyUnitOfWork):
@@ -720,3 +741,209 @@ def test_failure_evidence_storage_can_also_be_unavailable() -> None:
         unit_of_work_factory=uow_factory, clock=lambda: NOW
     ).transform(import_session_ids=[session_id], actor_id="test-suite")
     assert result.status is TransformationStatus.FAILED
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("transfer", "ledger_transfer_requires_review"),
+        ("withdrawal", "ledger_withdrawal_requires_review"),
+        ("deposit", "ledger_deposit_requires_review"),
+        ("credit", "ledger_credit_requires_review"),
+        ("adjustment", "ledger_adjustment_requires_review"),
+        ("dividend", "ledger_dividend_requires_review"),
+        ("margin", "ledger_margin_requires_review"),
+        ("rollover", "ledger_rollover_requires_review"),
+        ("sale", "ledger_sale_requires_review"),
+        ("settled", "ledger_settled_requires_review"),
+        ("nft_rebate", "ledger_nft_rebate_requires_review"),
+        ("trade", "ledger_trade_requires_review"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("asset", "amount", "fee"),
+    [("ETHW", "-3.25", "0"), ("USDC", "0.75", "0"), ("ZEUR", "-1250", "1")],
+)
+def test_financial_ledger_fallback_requires_review_without_projections(
+    kind: str, reason: str, asset: str, amount: str, fee: str
+) -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [ledger("synthetic-financial", kind, amount, asset=asset, fee=fee)],
+    )
+    result = transform(factory, session_id, version="kraken-domain-v2")
+    assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
+    assert result.checked_records == result.review_cases == 1
+    assert (
+        result.rewards
+        == result.acquisitions
+        == result.disposals
+        == result.trade_executions
+        == result.fee_events
+        == result.valuation_requirements
+        == result.internal_movements
+        == result.reused_objects
+        == result.conflicts
+        == 0
+    )
+    assert len(result.problems) == 1
+    problem = result.problems[0]
+    assert problem.code == reason
+    assert problem.kind is TransformationProblemKind.REVIEW
+    explanation = (
+        "Provider record is financially relevant but cannot be mapped "
+        "conservatively without additional context."
+    )
+    with factory() as database:
+        run = database.get(TransformationRun, result.run_id)
+        assert run is not None
+        assert run.review_cases == 1
+        assert run.created_objects == run.internal_movements == 0
+        decisions = tuple(database.scalars(select(TransformationDecision)))
+        issues = tuple(database.scalars(select(TransformationIssue)))
+        assert len(decisions) == len(issues) == 1
+        decision, issue = decisions[0], issues[0]
+        assert decision.decision_type is DecisionType.REVIEW_REQUIRED
+        assert decision.reason_code == issue.code == reason
+        assert decision.explanation == issue.message == problem.message == explanation
+        assert decision.domain_object_id is None
+        assert not issue.is_conflict
+        assert (
+            decision.raw_import_record_id
+            == issue.raw_import_record_id
+            == problem.raw_import_record_id
+        )
+        assert decision.transformation_run_id == issue.transformation_run_id == run.id
+        for entity in (
+            AcquisitionLot,
+            DisposalEvent,
+            TradeExecution,
+            FeeEvent,
+            ValuationRequirement,
+            DomainProvenance,
+        ):
+            assert database.scalar(select(func.count()).select_from(entity)) == 0
+
+
+def test_reused_rewards_and_three_unresolved_movements_require_review() -> None:
+    factory = database_factory()
+    reward_session = store_records(
+        factory,
+        [
+            ledger("synthetic-reward-1", "earn", "0.25", subtype="reward"),
+            ledger("synthetic-reward-2", "earn", "0.50", subtype="reward"),
+            ledger("synthetic-reward-3", "earn", "0.75", subtype="reward"),
+        ],
+    )
+    first = transform(factory, reward_session, version="kraken-domain-v2")
+    assert first.status is TransformationStatus.COMPLETED
+    assert first.rewards == first.acquisitions == first.valuation_requirements == 3
+    with factory() as database:
+        original_lots = set(database.scalars(select(AcquisitionLot.id)))
+        original_requirements = set(database.scalars(select(ValuationRequirement.id)))
+
+    movement_session = store_records(
+        factory,
+        [
+            ledger(
+                "synthetic-transfer-out",
+                "transfer",
+                "-3.25",
+                asset="ETHW",
+                refid="synthetic-reference-out",
+            ),
+            ledger(
+                "synthetic-transfer-in",
+                "transfer",
+                "0.75",
+                asset="USDC",
+                refid="synthetic-reference-in",
+            ),
+            ledger(
+                "synthetic-fiat-withdrawal",
+                "withdrawal",
+                "-1250",
+                asset="ZEUR",
+                fee="1",
+                refid="synthetic-reference-withdrawal",
+            ),
+        ],
+    )
+    # Repeated review runs must keep reward identities and projections unchanged.
+    for _ in range(2):
+        result = transform(
+            factory, reward_session, movement_session, version="kraken-domain-v2"
+        )
+        assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
+        assert result.checked_records == 6
+        assert result.reused_objects == 3
+        assert result.review_cases == len(result.problems) == 3
+        assert (
+            result.rewards
+            == result.acquisitions
+            == result.disposals
+            == result.trade_executions
+            == result.fee_events
+            == result.valuation_requirements
+            == result.internal_movements
+            == result.conflicts
+            == 0
+        )
+        with factory() as database:
+            assert set(database.scalars(select(AcquisitionLot.id))) == original_lots
+            assert (
+                set(database.scalars(select(ValuationRequirement.id)))
+                == original_requirements
+            )
+            run = database.get(TransformationRun, result.run_id)
+            assert run is not None
+            assert run.review_cases == 3
+            assert run.created_objects == run.internal_movements == 0
+            decisions = tuple(
+                database.scalars(
+                    select(TransformationDecision).where(
+                        TransformationDecision.transformation_run_id == result.run_id
+                    )
+                )
+            )
+            assert (
+                sum(
+                    item.decision_type is DecisionType.DOMAIN_EVENT_REUSED
+                    for item in decisions
+                )
+                == 3
+            )
+            reviews = [
+                item
+                for item in decisions
+                if item.decision_type is DecisionType.REVIEW_REQUIRED
+            ]
+            assert len(reviews) == 3
+            assert sorted(item.reason_code for item in reviews) == [
+                "ledger_transfer_requires_review",
+                "ledger_transfer_requires_review",
+                "ledger_withdrawal_requires_review",
+            ]
+            issues = tuple(
+                database.scalars(
+                    select(TransformationIssue).where(
+                        TransformationIssue.transformation_run_id == result.run_id
+                    )
+                )
+            )
+            assert len(issues) == 3
+            assert {item.raw_import_record_id for item in issues} == {
+                item.raw_import_record_id for item in reviews
+            }
+            for entity in (
+                DisposalEvent,
+                TradeExecution,
+                FeeEvent,
+                ValuationRun,
+                ValuationDecision,
+                TaxCalculationRun,
+                TaxReviewDecision,
+                ExportRun,
+            ):
+                assert database.scalar(select(func.count()).select_from(entity)) == 0

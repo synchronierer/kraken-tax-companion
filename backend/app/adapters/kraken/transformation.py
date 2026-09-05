@@ -53,6 +53,22 @@ INTERNAL_SUBTYPES = frozenset(
         "spotfromstaking",
     }
 )
+FINANCIAL_LEDGER_TYPES_REQUIRING_REVIEW = frozenset(
+    {
+        "adjustment",
+        "credit",
+        "deposit",
+        "dividend",
+        "margin",
+        "nft_rebate",
+        "rollover",
+        "sale",
+        "settled",
+        "trade",
+        "transfer",
+        "withdrawal",
+    }
+)
 TRANSFORMATION_CONTRACT_VERSION = "kraken-domain-v2"
 DOMAIN_IDENTITY_VERSION = "kraken-domain-v1"
 PROVIDER = "kraken"
@@ -435,6 +451,20 @@ class KrakenTransformationService:
                 counters,
                 problems,
                 "ledger_exchange_reference_missing",
+            )
+            return
+        if kind in FINANCIAL_LEDGER_TYPES_REQUIRING_REVIEW:
+            self._review(
+                unit,
+                run,
+                record,
+                counters,
+                problems,
+                f"ledger_{kind}_requires_review",
+                message=(
+                    "Provider record is financially relevant but cannot be mapped "
+                    "conservatively without additional context."
+                ),
             )
             return
         self._decision(
@@ -827,6 +857,7 @@ class KrakenTransformationService:
         code: str,
         *,
         conflict: bool = False,
+        message: str = "The raw record requires a conservative manual review.",
     ) -> None:
         kind = (
             TransformationProblemKind.CONFLICT
@@ -835,7 +866,6 @@ class KrakenTransformationService:
         )
         counters.conflicts += int(conflict)
         counters.reviews += 1
-        message = "The raw record requires a conservative manual review."
         unit.transformation_issues.add(
             TransformationIssue(
                 transformation_run_id=run.id,

@@ -199,3 +199,35 @@ Kleinere konfigurierte Intervalle reduzieren den Schutz für Standard-Konten.
 Lange Historien benötigen mit zwei Durchläufen entsprechend mehr Zeit;
 HTTP-/Proxy-Timeouts und die konfigurierte Stale-Schwelle müssen dazu passen.
 Dieses Hardening führt keinen realen Sync und keine Migration aus.
+
+## Sprint 4A.2: Ungeklärte finanzielle Ledgerbewegungen
+
+Bekannte finanzielle Ledgerarten ohne sicheren Domain-Mappingpfad erzeugen
+`REVIEW_REQUIRED` und ein `TransformationIssue` pro geprüftem Record.
+Der Review-Zähler steigt entsprechend; der Run endet mit
+`COMPLETED_WITH_REVIEW`. Das betrifft den Fallback für `transfer`,
+`withdrawal`, `deposit`, `credit`, `adjustment`, `dividend`, `margin`,
+`rollover`, `sale`, `settled`, `nft_rebate` und Ledger-`trade`.
+Der Reason Code lautet jeweils `ledger_<type>_requires_review`, beispielsweise
+`ledger_transfer_requires_review`.
+
+Decision, Issue und Ergebnisproblem erklären übereinstimmend:
+„Provider record is financially relevant but cannot be mapped conservatively
+without additional context.“
+
+Die Review-Klassifikation erzeugt keine Domainobjekte und keinen internen
+Movement-Zähler. Ein Transfer belegt allein weder Kauf, Verkauf noch
+Eigenübertragung; auch ein Fiat-Withdrawal mit Gebühr erzeugt weder
+Krypto-Disposal noch FeeEvent. Zeitliche Nähe oder ein Delisting begründen keine
+automatische Verknüpfung zweier Transfers.
+
+Bestehende sichere Reward-, interne Earn-/Staking- und Exchange-Mappingpfade
+bleiben erhalten. Strukturell fremde Quellen bleiben `UNSUPPORTED` mit
+`source_unsupported`; unbekannte Ledgerarten außerhalb des unterstützten
+Typvertrags behalten `ledger_type_unsupported`.
+
+Bei einer später ausdrücklich gestarteten erneuten Transformation werden
+identische Reward-Projektionen wiederverwendet. Die ungeklärten Bewegungen
+erhalten neue Review-Evidenz im jeweiligen Run; historische Entscheidungen
+werden nicht überschrieben. Diese Änderung startet weder eine erneute
+Transformation noch Sync, Bewertung, Steuerberechnung oder Export.

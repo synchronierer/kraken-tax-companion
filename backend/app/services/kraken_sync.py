@@ -169,7 +169,8 @@ class KrakenSyncService:
                 "kraken_sync_already_running", "Ein Kraken-Sync läuft bereits."
             ) from error
         try:
-            preview = self.client_factory().ledger_preview(
+            client = self.client_factory()
+            preview = client.ledger_preview(
                 start=run.requested_from,
                 end=run.requested_to,
                 asset=None,
@@ -177,7 +178,7 @@ class KrakenSyncService:
                 diagnostic_limit=0,
             )
             self._validate_preview(preview)
-            confirmation = self.client_factory().ledger_preview(
+            confirmation = client.ledger_preview(
                 start=run.requested_from,
                 end=run.requested_to,
                 asset=None,

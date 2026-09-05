@@ -178,6 +178,7 @@ def test_private_request_success_retry_and_safe_errors() -> None:
         max_retries=1,
         opener=opener,
         sleeper=sleeps.append,
+        clock=iter(range(0, 1000, 10)).__next__,
     )
     assert preview(provider).ready_for_import
     assert sleeps == [1]
@@ -194,6 +195,7 @@ def test_private_request_success_retry_and_safe_errors() -> None:
         max_retries=1,
         opener=lambda _request, _timeout: FakeResponse(next(rate_attempts)),
         sleeper=sleeps.append,
+        clock=iter(range(0, 1000, 10)).__next__,
     )
     assert preview(rate_provider).ready_for_import
 
@@ -211,6 +213,7 @@ def test_private_request_success_retry_and_safe_errors() -> None:
         max_retries=1,
         opener=retry_server,
         sleeper=sleeps.append,
+        clock=iter(range(0, 1000, 10)).__next__,
     )
     assert preview(server_provider).ready_for_import
 
@@ -228,6 +231,7 @@ def test_private_request_success_retry_and_safe_errors() -> None:
         max_retries=1,
         opener=retry_timeout,
         sleeper=sleeps.append,
+        clock=iter(range(0, 1000, 10)).__next__,
     )
     assert preview(timeout_provider).ready_for_import
 

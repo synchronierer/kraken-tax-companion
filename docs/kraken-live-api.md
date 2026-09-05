@@ -156,3 +156,46 @@ Plattformgebühr und Netto-Anschaffung. Der kanonische Kraken-Datensatz bleibt
 unverändert; es wird kein zusätzliches FeeEvent oder Ledger-Ereignis erfunden.
 Bewertung und FIFO werden durch den Live-Import weiterhin nicht automatisch
 gestartet.
+
+## Sprint 4A.1: Ledger-Pacing und Rate-Limit-Retries
+
+Private Ledger-Requests desselben Clients starten standardmäßig mit mindestens
+neun Sekunden Abstand. Der erste Request wartet nicht. Eine monotone Uhr misst
+den Abstand; Pagination und Retries durchlaufen dieselbe Drosselung.
+Uhr und Sleeper sind für Tests injizierbar. Andere Endpunkte erhalten kein
+Ledger-Pacing.
+
+Ein inkrementeller Sync erzeugt genau einen Leseclient und verwendet ihn für
+beide vollständigen Konsistenzabrufe. Damit bleibt der Abstand auch zwischen
+Preview und Confirmation erhalten. Provideridentität, Lookback, atomarer Import
+und die ausschließliche Verwendung von COMPLETED als Checkpoint bleiben erhalten.
+FAILED bleibt Audit-Historie und verhindert ohne PROCESSING keinen späteren
+manuellen Sync.
+
+Konfiguration in Settings, Compose und `.env.example`:
+
+| Variable | Default | Zulässiger Bereich |
+| --- | --- | --- |
+| `APP_KRAKEN_LEDGER_MIN_INTERVAL_SECONDS` | 9 | größer 0 bis 300 Sekunden |
+| `APP_KRAKEN_RATE_LIMIT_RETRY_BASE_SECONDS` | 30 | 30 bis 3600 Sekunden |
+
+HTTP 429 und als `kraken_rate_limited` klassifizierte Kraken-JSON-Fehler warten
+vor Wiederholung mindestens Basis × 2 hoch Retry-Index: standardmäßig 30 und
+60 Sekunden. `APP_KRAKEN_API_MAX_RETRIES` begrenzt weiterhin die Wiederholungen.
+HTTP `Retry-After` wird als Sekundenwert oder HTTP-Datum berücksichtigt; es kann
+den sicheren Backoff verlängern, aber nicht verkürzen. Ungültige Werte werden
+ignoriert. Nach Ausschöpfung bleibt der Fehlercode `kraken_rate_limited` erhalten.
+
+Timeouts, Netzwerkfehler und HTTP 5xx behalten den kurzen temporären Backoff
+(1/2 Sekunden, bei weiteren Versuchen maximal 4 Sekunden). Zusätzlich gilt für
+Ledger-Requests weiterhin der Mindestabstand zwischen Requeststarts.
+
+Die gemeldete reale 429-Antwort motiviert diese Absicherung: ungepacete
+Account-History-Pagination und zwei Konsistenzdurchläufe können Bursts erzeugen.
+Die genaue Belegung des Kraken-Limitzählers beim Fehler ist nicht bekannt.
+Das Pacing gilt pro Client, nicht pro API-Key über mehrere Prozesse hinweg.
+Parallele Zugriffe anderer Clients können daher weiterhin 429 auslösen.
+Kleinere konfigurierte Intervalle reduzieren den Schutz für Standard-Konten.
+Lange Historien benötigen mit zwei Durchläufen entsprechend mehr Zeit;
+HTTP-/Proxy-Timeouts und die konfigurierte Stale-Schwelle müssen dazu passen.
+Dieses Hardening führt keinen realen Sync und keine Migration aus.

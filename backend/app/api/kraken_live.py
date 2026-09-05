@@ -166,6 +166,8 @@ def build_kraken_client(settings: Settings) -> KrakenPrivateClient:
         base_url=settings.kraken_api_base_url,
         timeout=settings.kraken_api_timeout,
         max_retries=settings.kraken_api_max_retries,
+        ledger_min_interval_seconds=settings.kraken_ledger_min_interval_seconds,
+        rate_limit_retry_base_seconds=settings.kraken_rate_limit_retry_base_seconds,
     )
 
 

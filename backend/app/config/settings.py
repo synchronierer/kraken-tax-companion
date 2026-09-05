@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     kraken_api_base_url: str = "https://api.kraken.com"
     kraken_api_timeout: int = 15
     kraken_api_max_retries: int = 2
+    kraken_ledger_min_interval_seconds: float = Field(default=9, gt=0, le=300)
+    kraken_rate_limit_retry_base_seconds: float = Field(default=30, ge=30, le=3600)
     kraken_sync_initial_start: datetime = datetime(2020, 1, 1, tzinfo=UTC)
     kraken_sync_lookback_seconds: int = Field(default=604800, gt=0, le=7776000)
     kraken_sync_settlement_lag_seconds: int = Field(default=300, ge=0, le=86400)

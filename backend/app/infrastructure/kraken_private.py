@@ -3,12 +3,14 @@ import binascii
 import hashlib
 import hmac
 import json
+import math
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from email.utils import parsedate_to_datetime
 from typing import Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -166,6 +168,9 @@ class KrakenPrivateClient:
         timeout: int = 15,
         max_retries: int = 2,
         max_pages: int = 10_000,
+        ledger_min_interval_seconds: float = 9,
+        rate_limit_retry_base_seconds: float = 30,
+        clock: Callable[[], float] = time.monotonic,
         nonce: MonotonicNonce | None = None,
         opener: OpenRequest = _open_url,
         sleeper: Callable[[float], None] = time.sleep,
@@ -187,6 +192,16 @@ class KrakenPrivateClient:
                 "kraken_configuration_invalid",
                 "Timeout und Wiederholungsanzahl sind ungültig.",
             )
+        if not (0 < ledger_min_interval_seconds <= 300) or not (
+            30 <= rate_limit_retry_base_seconds <= 3600
+        ):
+            raise KrakenPrivateError(
+                "kraken_configuration_invalid", "Kraken-Wartezeiten sind ungültig."
+            )
+        self._clock = clock
+        self._ledger_interval = ledger_min_interval_seconds
+        self._rate_limit_base = rate_limit_retry_base_seconds
+        self._last_ledger_start: float | None = None
         self._api_key = api_key
         self._api_secret = api_secret
         self.base_url = base_url.rstrip("/")
@@ -202,6 +217,14 @@ class KrakenPrivateClient:
     ) -> Mapping[str, object]:
         attempt = 0
         while True:
+            if path == self.ledger_path:
+                if self._last_ledger_start is not None:
+                    remaining = self._ledger_interval - (
+                        self._clock() - self._last_ledger_start
+                    )
+                    if remaining > 0:
+                        self._sleeper(remaining)
+                self._last_ledger_start = self._clock()
             data = dict(fields)
             data["nonce"] = self._nonce.next()
             encoded = urlencode(data).encode("ascii")
@@ -249,7 +272,12 @@ class KrakenPrivateClient:
                         temporary=error.code >= 500,
                     )
                 if provider_error.temporary and attempt < self.max_retries:
-                    self._sleeper(min(2**attempt, 4))
+                    delay = self._retry_delay(provider_error, attempt)
+                    if error.code == 429:
+                        delay = max(
+                            delay, self._retry_after(error.headers.get("Retry-After"))
+                        )
+                    self._sleeper(delay)
                     attempt += 1
                     continue
                 raise provider_error from error
@@ -273,7 +301,7 @@ class KrakenPrivateClient:
                 ) from error
             except KrakenPrivateError as error:
                 if error.temporary and attempt < self.max_retries:
-                    self._sleeper(min(2**attempt, 4))
+                    self._sleeper(self._retry_delay(error, attempt))
                     attempt += 1
                     continue
                 raise
@@ -281,6 +309,27 @@ class KrakenPrivateClient:
                 raise KrakenPrivateError(
                     "kraken_invalid_response", "Kraken lieferte eine ungültige Antwort."
                 ) from error
+
+    def _retry_delay(self, error: KrakenPrivateError, attempt: int) -> float:
+        backoff_factor = float(2**attempt)
+        if error.code == "kraken_rate_limited":
+            return self._rate_limit_base * backoff_factor
+        return min(backoff_factor, 4.0)
+
+    @staticmethod
+    def _retry_after(value: str | None) -> float:
+        if value is None:
+            return 0
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                seconds = (
+                    parsedate_to_datetime(value) - datetime.now(UTC)
+                ).total_seconds()
+            except (ValueError, TypeError, OverflowError):
+                return 0
+        return max(0, seconds) if math.isfinite(seconds) else 0
 
     def check_ledger_access(self) -> None:
         result = self._private_post(self.ledger_path, {"type": "all", "ofs": "0"})

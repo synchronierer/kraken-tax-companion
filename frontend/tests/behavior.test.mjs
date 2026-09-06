@@ -229,3 +229,24 @@ test("Kraken sync remains a manual isolated workflow", async () => {
   assert.match(source, /request<Row>\("\/api\/kraken-sync",\{method:"POST"\}\)/);
   assert.doesNotMatch(source.match(/async function synchronize\(\).*?\n/)?.[0] ?? "", /valuations|tax-calculations|exports|tax-review/);
 });
+
+test("sale planner is explicitly dry-run only and validates decimal input", async () => {
+  const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const model = await importTypeScript("../src/ui-models.ts");
+  assert.match(source, /Verkauf planen/);
+  assert.match(source, /KEINE ORDER – NUR SIMULATION/);
+  assert.match(source, /\/api\/sale-proposals\/simulate/);
+  assert.match(source, /Exchange-Bestand noch nicht abgeglichen/);
+  assert.match(source, /kein garantierter Ausführungspreis/);
+  assert.match(source, /Verkauf simulieren/);
+  assert.doesNotMatch(source, />Kaufen<|>Verkaufen<|>Order senden</);
+  const valid = {
+    asset: "ETH", mode: "quantity", quantity: "0.01", targetEur: "",
+    referencePriceEur: "2000.000000000000000001",
+  };
+  assert.equal(model.validateSaleSimulation(valid), null);
+  assert.match(model.validateSaleSimulation({ ...valid, asset: "" }), /Asset/);
+  assert.match(model.validateSaleSimulation({ ...valid, referencePriceEur: "0" }), /Referenzpreis/);
+  assert.match(model.validateSaleSimulation({ ...valid, quantity: "-1" }), /Verkaufsmenge/);
+  assert.match(model.validateSaleSimulation({ ...valid, mode: "target_eur", targetEur: "0" }), /Zielerlös/);
+});

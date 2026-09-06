@@ -1,5 +1,15 @@
 # API
 
+## Sale proposals
+
+- `GET /api/sale-proposals/inventory` returns documented FIFO inventory for the
+  read-only planner and keeps exchange availability separate.
+- `POST /api/sale-proposals/simulate` performs a stateless FIFO dry-run using an
+  explicitly supplied manual reference price.
+
+See [Sprint 5A sale planner](sprint-5a-sale-planner.md) for the safety and tax
+semantics.
+
 ## Steuerliche Reviewentscheidungen
 
 - `GET /api/tax-review-decisions` listet offene und entschiedene

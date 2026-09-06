@@ -167,3 +167,26 @@ export function pageQuery(offset: number, limit: number): string {
   const safeLimit = Math.min(200, Math.max(1, Math.trunc(limit)));
   return `offset=${safeOffset}&limit=${safeLimit}`;
 }
+
+export function validateSaleSimulation(fields: {
+  asset: string;
+  mode: string;
+  quantity: string;
+  targetEur: string;
+  referencePriceEur: string;
+}): string | null {
+  const positive = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+  const greaterThanZero = (value: string) =>
+    positive.test(value) && !/^0(?:\.0+)?$/.test(value);
+  if (!fields.asset) return "Bitte ein Asset auswählen.";
+  if (!greaterThanZero(fields.referencePriceEur)) {
+    return "Der Referenzpreis muss eine positive Dezimalzahl sein.";
+  }
+  if (fields.mode === "quantity" && !greaterThanZero(fields.quantity)) {
+    return "Die Verkaufsmenge muss eine positive Dezimalzahl sein.";
+  }
+  if (fields.mode === "target_eur" && !greaterThanZero(fields.targetEur)) {
+    return "Der Zielerlös muss eine positive Dezimalzahl sein.";
+  }
+  return null;
+}

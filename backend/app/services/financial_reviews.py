@@ -26,6 +26,14 @@ class SuggestedReview:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True, kw_only=True)
+class DelistingCandidate:
+    record: RawImportRecord
+    amount: Decimal
+    timestamp: datetime
+    asset: str
+
+
 def ledger_values(record: RawImportRecord) -> dict[str, str]:
     return {
         str(key).strip().lower(): str(value).strip()
@@ -35,8 +43,12 @@ def ledger_values(record: RawImportRecord) -> dict[str, str]:
 
 def ledger_asset(record: RawImportRecord) -> str:
     raw = ledger_values(record).get("asset", "")
+    if not raw:
+        raise ValueError("Kraken ledger asset must not be empty.")
     resolved = resolve_asset(raw)
-    return resolved.canonical_code or raw.upper().removeprefix("Z")
+    if resolved.canonical_code is None:
+        raise ValueError("Invalid Kraken ledger asset.")
+    return resolved.canonical_code
 
 
 def ledger_time(record: RawImportRecord) -> datetime:
@@ -46,26 +58,29 @@ def ledger_time(record: RawImportRecord) -> datetime:
 
 def ledger_decimal(record: RawImportRecord, name: str) -> Decimal:
     try:
-        return Decimal(ledger_values(record).get(name, "0"))
+        value = Decimal(ledger_values(record)[name])
     except InvalidOperation as error:
         raise ValueError(f"Invalid Kraken ledger {name}.") from error
+    if not value.is_finite():
+        raise ValueError(f"Invalid Kraken ledger {name}.")
+    return value
 
 
 def fiat_withdrawal_suggestion(
     record: RawImportRecord, *, has_trade_context: bool
 ) -> SuggestedReview | None:
+    if record.source != "kraken-ledgers":
+        return None
     values = ledger_values(record)
-    amount = ledger_decimal(record, "amount")
-    fee = ledger_decimal(record, "fee")
-    asset = ledger_asset(record)
-    if (
-        record.source != "kraken-ledgers"
-        or values.get("type", "").lower() != "withdrawal"
-        or amount >= 0
-        or fee < 0
-        or asset not in FIAT_ASSETS
-        or has_trade_context
-    ):
+    if values.get("type", "").lower() != "withdrawal":
+        return None
+    try:
+        amount = ledger_decimal(record, "amount")
+        fee = ledger_decimal(record, "fee")
+        asset = ledger_asset(record)
+    except (KeyError, ValueError):
+        return None
+    if amount >= 0 or fee < 0 or asset not in FIAT_ASSETS or has_trade_context:
         return None
     return SuggestedReview(
         suggestion_type=FinancialSuggestionType.OWN_ACCOUNT_FIAT_WITHDRAWAL,
@@ -90,48 +105,53 @@ def fiat_withdrawal_suggestion(
 def delisting_suggestions(
     records: list[RawImportRecord], *, excluded_record_ids: set[UUID]
 ) -> list[SuggestedReview]:
-    candidates: list[RawImportRecord] = []
+    candidates: list[DelistingCandidate] = []
     for record in records:
+        if record.source != "kraken-ledgers" or record.id in excluded_record_ids:
+            continue
         values = ledger_values(record)
+        if values.get("type", "").lower() != "transfer":
+            continue
         try:
             amount, fee = (
                 ledger_decimal(record, "amount"),
                 ledger_decimal(record, "fee"),
             )
             timestamp = ledger_time(record)
+            asset = ledger_asset(record)
         except (KeyError, ValueError):
             continue
-        if (
-            record.source == "kraken-ledgers"
-            and record.id not in excluded_record_ids
-            and values.get("type", "").lower() == "transfer"
-            and amount != 0
-            and fee == 0
-            and timestamp.tzinfo is UTC
-        ):
-            candidates.append(record)
-    outgoing = [item for item in candidates if ledger_decimal(item, "amount") < 0]
-    incoming = [item for item in candidates if ledger_decimal(item, "amount") > 0]
-    pairs: dict[UUID, list[RawImportRecord]] = {}
-    reverse: dict[UUID, list[RawImportRecord]] = {}
+        if amount != 0 and fee == 0 and timestamp.tzinfo is UTC:
+            candidates.append(
+                DelistingCandidate(
+                    record=record,
+                    amount=amount,
+                    timestamp=timestamp,
+                    asset=asset,
+                )
+            )
+    outgoing = [item for item in candidates if item.amount < 0]
+    incoming = [item for item in candidates if item.amount > 0]
+    pairs: dict[UUID, list[DelistingCandidate]] = {}
+    reverse: dict[UUID, list[DelistingCandidate]] = {}
     for left in outgoing:
         for right in incoming:
-            gap = ledger_time(right) - ledger_time(left)
+            gap = right.timestamp - left.timestamp
             if (
                 timedelta(0) <= gap <= DELISTING_WINDOW
-                and ledger_asset(left) != ledger_asset(right)
-                and ledger_asset(left) not in STABLE_PROCEEDS_ASSETS
-                and ledger_asset(right) in STABLE_PROCEEDS_ASSETS
+                and left.asset != right.asset
+                and left.asset not in STABLE_PROCEEDS_ASSETS
+                and right.asset in STABLE_PROCEEDS_ASSETS
             ):
-                pairs.setdefault(left.id, []).append(right)
-                reverse.setdefault(right.id, []).append(left)
+                pairs.setdefault(left.record.id, []).append(right)
+                reverse.setdefault(right.record.id, []).append(left)
     suggestions: list[SuggestedReview] = []
     for left in outgoing:
-        matches = pairs.get(left.id, [])
-        if len(matches) != 1 or len(reverse.get(matches[0].id, [])) != 1:
+        matches = pairs.get(left.record.id, [])
+        if len(matches) != 1 or len(reverse.get(matches[0].record.id, [])) != 1:
             continue
         right = matches[0]
-        start, end = ledger_time(left), ledger_time(right)
+        start, end = left.timestamp, right.timestamp
         suggestions.append(
             SuggestedReview(
                 suggestion_type=(
@@ -148,20 +168,20 @@ def delisting_suggestions(
                     "Für keinen Record wurde ein normaler Trade oder eine bestätigte "
                     "Zuordnung gefunden.",
                 ),
-                records=((left, "outgoing"), (right, "incoming")),
+                records=((left.record, "outgoing"), (right.record, "incoming")),
                 metadata={
-                    "outgoing_record_id": str(left.id),
-                    "incoming_record_id": str(right.id),
-                    "disposed_asset": ledger_asset(left),
-                    "disposed_quantity": str(abs(ledger_decimal(left, "amount"))),
-                    "proceeds_asset": ledger_asset(right),
-                    "proceeds_quantity": str(ledger_decimal(right, "amount")),
+                    "outgoing_record_id": str(left.record.id),
+                    "incoming_record_id": str(right.record.id),
+                    "disposed_asset": left.asset,
+                    "disposed_quantity": str(abs(left.amount)),
+                    "proceeds_asset": right.asset,
+                    "proceeds_quantity": str(right.amount),
                     "event_window_start": start.isoformat(),
                     "event_window_end": end.isoformat(),
                     "time_distance_seconds": int((end - start).total_seconds()),
                     "provider_refids": [
-                        ledger_values(left).get("refid"),
-                        ledger_values(right).get("refid"),
+                        ledger_values(left.record).get("refid"),
+                        ledger_values(right.record).get("refid"),
                     ],
                     "provider_explicitly_linked": False,
                 },

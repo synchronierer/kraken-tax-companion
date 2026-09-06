@@ -82,6 +82,25 @@ def ledger_record(
     )
 
 
+def raw_record(
+    session_id: UUID,
+    *,
+    source: str,
+    payload: dict[str, str],
+    sequence_number: int = 0,
+) -> RawImportRecord:
+    record_id = uuid4()
+    return RawImportRecord(
+        id=record_id,
+        import_session_id=session_id,
+        source=source,
+        content_hash=record_id.hex * 2,
+        sequence_number=sequence_number,
+        external_id=f"test:{record_id}",
+        payload=payload,
+    )
+
+
 @pytest.fixture
 def review_database() -> Iterator[Session]:
     engine = create_engine(
@@ -198,6 +217,163 @@ def decision_payload(
         "record_ids": [str(value) for value in record_ids],
         "decided_by": "local-user",
         "reason": "Vom Kontoinhaber anhand der Originalbelege bestätigt.",
+    }
+
+
+def test_irrelevant_non_kraken_record_without_asset_is_skipped(
+    review_database: Session,
+) -> None:
+    session_id = review_database.scalar(select(ImportSession.id))
+    assert session_id is not None
+    record = raw_record(
+        session_id,
+        source="other-provider",
+        payload={"type": "withdrawal"},
+    )
+
+    assert fiat_withdrawal_suggestion(record, has_trade_context=False) is None
+
+
+def test_non_withdrawal_kraken_record_without_asset_is_skipped(
+    review_database: Session,
+) -> None:
+    session_id = review_database.scalar(select(ImportSession.id))
+    assert session_id is not None
+    record = raw_record(
+        session_id,
+        source="kraken-ledgers",
+        payload={"type": "deposit"},
+    )
+
+    assert fiat_withdrawal_suggestion(record, has_trade_context=False) is None
+
+
+def test_malformed_kraken_withdrawal_without_asset_is_skipped(
+    review_database: Session,
+) -> None:
+    session_id = review_database.scalar(select(ImportSession.id))
+    assert session_id is not None
+    record = raw_record(
+        session_id,
+        source="kraken-ledgers",
+        payload={"type": "withdrawal", "amount": "-10", "fee": "1"},
+    )
+
+    assert fiat_withdrawal_suggestion(record, has_trade_context=False) is None
+    with pytest.raises(ValueError, match="Kraken ledger asset must not be empty"):
+        ledger_asset(record)
+
+
+def test_malformed_kraken_transfer_without_valid_asset_is_skipped(
+    review_database: Session,
+) -> None:
+    session_id = review_database.scalar(select(ImportSession.id))
+    assert session_id is not None
+    missing_asset = raw_record(
+        session_id,
+        source="kraken-ledgers",
+        payload={
+            "type": "transfer",
+            "time": "2026-03-06 00:00:00",
+            "amount": "-1",
+            "fee": "0",
+        },
+    )
+    invalid_asset = raw_record(
+        session_id,
+        source="kraken-ledgers",
+        payload={
+            "type": "transfer",
+            "time": "2026-03-06 00:00:00",
+            "asset": "??",
+            "amount": "-1",
+            "fee": "0",
+        },
+    )
+    valid_incoming = ledger_record(
+        session_id,
+        uuid4(),
+        "valid-incoming",
+        "2026-03-07 00:00:00",
+        "transfer",
+        "USDC",
+        "+1",
+        "0",
+        "valid-incoming",
+    )
+
+    assert (
+        delisting_suggestions(
+            [missing_asset, invalid_asset, valid_incoming], excluded_record_ids=set()
+        )
+        == []
+    )
+    with pytest.raises(ValueError, match="Invalid Kraken ledger asset"):
+        ledger_asset(invalid_asset)
+
+
+def test_suggestion_endpoint_skips_irrelevant_and_malformed_records(
+    review_client: TestClient, review_database: Session
+) -> None:
+    session_id = review_database.scalar(select(ImportSession.id))
+    transformation_run_id = review_database.scalar(select(TransformationRun.id))
+    assert session_id is not None
+    assert transformation_run_id is not None
+    mixed_records = [
+        raw_record(
+            session_id,
+            source="other-provider",
+            payload={"type": "withdrawal"},
+            sequence_number=3,
+        ),
+        raw_record(
+            session_id,
+            source="kraken-ledgers",
+            payload={"type": "deposit"},
+            sequence_number=4,
+        ),
+        raw_record(
+            session_id,
+            source="kraken-ledgers",
+            payload={"type": "withdrawal", "amount": "-10", "fee": "1"},
+            sequence_number=5,
+        ),
+        raw_record(
+            session_id,
+            source="kraken-ledgers",
+            payload={
+                "type": "transfer",
+                "time": "2026-03-06 00:00:00",
+                "asset": "",
+                "amount": "-1",
+                "fee": "0",
+            },
+            sequence_number=6,
+        ),
+    ]
+    review_database.add_all(mixed_records)
+    review_database.flush()
+    review_database.add_all(
+        TransformationIssue(
+            transformation_run_id=transformation_run_id,
+            raw_import_record_id=record.id,
+            code="malformed_financial_review",
+            message="Malformed or irrelevant test record.",
+            is_conflict=False,
+            occurred_at=NOW,
+        )
+        for record in mixed_records
+    )
+    review_database.commit()
+
+    response = review_client.post("/api/financial-review-suggestions")
+
+    assert response.status_code == 200
+    assert response.json()["created_count"] == 2
+    suggestions = list(review_database.scalars(select(FinancialReviewSuggestion)))
+    assert {item.suggestion_type for item in suggestions} == {
+        FinancialSuggestionType.OWN_ACCOUNT_FIAT_WITHDRAWAL,
+        FinancialSuggestionType.POSSIBLE_DELISTING_LIQUIDATION,
     }
 
 
@@ -537,9 +713,23 @@ def test_conservative_engine_does_not_pair_weak_or_ambiguous_evidence(
         "0",
         "invalid-asset",
     )
-    assert ledger_asset(invalid_asset) == "??"
+    with pytest.raises(ValueError, match="Invalid Kraken ledger asset"):
+        ledger_asset(invalid_asset)
     with pytest.raises(ValueError, match="Invalid Kraken ledger amount"):
         ledger_decimal(malformed, "amount")
+    non_finite = ledger_record(
+        session_id,
+        uuid4(),
+        "non-finite",
+        "2026-03-09 00:00:00",
+        "transfer",
+        "USDC",
+        "NaN",
+        "0",
+        "non-finite",
+    )
+    with pytest.raises(ValueError, match="Invalid Kraken ledger amount"):
+        ledger_decimal(non_finite, "amount")
     with pytest.raises(ValueError, match="exactly one"):
         resolution_metadata(FinancialReviewType.OWN_ACCOUNT_FIAT_WITHDRAWAL, [])
     with pytest.raises(ValueError, match="not a fiat withdrawal"):

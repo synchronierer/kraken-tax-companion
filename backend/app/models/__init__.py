@@ -12,6 +12,11 @@ from app.core.entities import (
     RawImportRecord,
     Sale,
 )
+from app.core.financial_review import (
+    FinancialReviewRecordLink,
+    FinancialReviewResolution,
+    FinancialReviewSuggestion,
+)
 from app.core.incremental_sync import IncrementalSyncRun, SyncStatus
 from app.core.tax import (
     DisposalCalculation,
@@ -49,6 +54,9 @@ __all__ = [
     "DisposalEvent",
     "DomainProvenance",
     "FeeEvent",
+    "FinancialReviewRecordLink",
+    "FinancialReviewResolution",
+    "FinancialReviewSuggestion",
     "ImportError",
     "ImportSession",
     "ImportStatus",

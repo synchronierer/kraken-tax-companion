@@ -10,6 +10,7 @@ from app.database.mappings import (
     acquisition_lots,
     audit_events,
     disposal_events,
+    financial_review_record_links,
     import_sessions,
     raw_import_records,
     tax_review_cases,
@@ -46,6 +47,21 @@ class SqlAlchemyDashboardQueries:
             select(successor.c.id).where(
                 successor.c.supersedes_id == valuation_decisions.c.id
             )
+        )
+        resolved_financial_issue = exists(
+            select(financial_review_record_links.c.id).where(
+                financial_review_record_links.c.raw_import_record_id
+                == transformation_issues.c.raw_import_record_id,
+                financial_review_record_links.c.resolution_id.is_not(None),
+            )
+        )
+        open_transformation_issues = int(
+            self._session.scalar(
+                select(func.count())
+                .select_from(transformation_issues)
+                .where(~resolved_financial_issue)
+            )
+            or 0
         )
         return DashboardCounts(
             imports=self._count(import_sessions),
@@ -86,7 +102,7 @@ class SqlAlchemyDashboardQueries:
                 )
                 or 0
             )
-            + self._count(transformation_issues)
+            + open_transformation_issues
             + self._count(tax_review_cases)
             + int(
                 self._session.scalar(

@@ -89,6 +89,9 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "tax_review_decisions",
         "export_runs",
         "export_artifacts",
+        "financial_review_suggestions",
+        "financial_review_resolutions",
+        "financial_review_record_links",
     }
     assert {"import_hash", "error_summary"}.issubset(
         {column["name"] for column in inspector.get_columns("import_sessions")}
@@ -109,6 +112,15 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "ix_kraken_sync_checkpoint",
         "uq_kraken_sync_active",
     }
+    command.downgrade(config, "0011_kraken_incremental_sync")
+    assert "financial_review_resolutions" not in inspect(engine).get_table_names()
+    command.upgrade(config, "head")
+    command.check(config)
+    assert "financial_review_resolutions" in inspect(engine).get_table_names()
+    assert {
+        index["name"]
+        for index in inspect(engine).get_indexes("financial_review_record_links")
+    } == {"uq_financial_review_confirmed_raw"}
     assert {
         constraint["name"]
         for constraint in inspector.get_check_constraints("kraken_sync_runs")

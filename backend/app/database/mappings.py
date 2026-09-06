@@ -32,6 +32,17 @@ from app.core.entities import (
     RawImportRecord,
     Sale,
 )
+from app.core.financial_review import (
+    FinancialReviewRecordLink,
+    FinancialReviewResolution,
+    FinancialReviewSuggestion,
+    FinancialReviewType,
+    FinancialSuggestionType,
+    ResolutionStatus,
+    ReviewConfidence,
+    SuggestionStatus,
+    TaxMappingStatus,
+)
 from app.core.incremental_sync import IncrementalSyncRun, SyncStatus
 from app.core.tax import (
     DisposalCalculation,
@@ -399,6 +410,115 @@ transformation_issues = Table(
     Column("message", String(1024), nullable=False),
     Column("is_conflict", Boolean, nullable=False),
     Column("occurred_at", UtcDateTime(), nullable=False),
+)
+
+financial_review_suggestions = Table(
+    "financial_review_suggestions",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "transformation_issue_id",
+        UUID,
+        ForeignKey("transformation_issues.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column(
+        "suggestion_type",
+        Enum(FinancialSuggestionType, native_enum=False),
+        nullable=False,
+    ),
+    Column("status", Enum(SuggestionStatus, native_enum=False), nullable=False),
+    Column("confidence", Enum(ReviewConfidence, native_enum=False), nullable=False),
+    Column("reasons", STRUCTURED_JSON, nullable=False),
+    Column("metadata", STRUCTURED_JSON, nullable=False),
+    Column("created_at", UtcDateTime(), nullable=False),
+    Column("decided_at", UtcDateTime()),
+    Column("decided_by", String(255)),
+    Column("decision_reason", String(1024)),
+    UniqueConstraint(
+        "transformation_issue_id",
+        "suggestion_type",
+        name="uq_financial_review_suggestion_issue_type",
+    ),
+)
+
+financial_review_resolutions = Table(
+    "financial_review_resolutions",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "transformation_issue_id",
+        UUID,
+        ForeignKey("transformation_issues.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    ),
+    Column(
+        "resolution_type", Enum(FinancialReviewType, native_enum=False), nullable=False
+    ),
+    Column("status", Enum(ResolutionStatus, native_enum=False), nullable=False),
+    Column("created_at", UtcDateTime(), nullable=False),
+    Column("decided_at", UtcDateTime(), nullable=False),
+    Column("decided_by", String(255), nullable=False),
+    Column("reason", String(1024), nullable=False),
+    Column("source", String(64), nullable=False),
+    Column(
+        "confidence",
+        Enum(
+            ReviewConfidence,
+            name="resolutionreviewconfidence",
+            native_enum=False,
+        ),
+    ),
+    Column(
+        "tax_mapping_status", Enum(TaxMappingStatus, native_enum=False), nullable=False
+    ),
+    Column("metadata", STRUCTURED_JSON, nullable=False),
+)
+
+financial_review_record_links = Table(
+    "financial_review_record_links",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "raw_import_record_id",
+        UUID,
+        ForeignKey("raw_import_records.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column(
+        "suggestion_id",
+        UUID,
+        ForeignKey("financial_review_suggestions.id", ondelete="CASCADE"),
+    ),
+    Column(
+        "resolution_id",
+        UUID,
+        ForeignKey("financial_review_resolutions.id", ondelete="CASCADE"),
+    ),
+    Column("role", String(32), nullable=False),
+    CheckConstraint(
+        "(suggestion_id IS NOT NULL AND resolution_id IS NULL) OR "
+        "(suggestion_id IS NULL AND resolution_id IS NOT NULL)",
+        name="ck_financial_review_link_one_parent",
+    ),
+    UniqueConstraint(
+        "suggestion_id",
+        "raw_import_record_id",
+        name="uq_financial_review_suggestion_raw",
+    ),
+    UniqueConstraint(
+        "resolution_id",
+        "raw_import_record_id",
+        name="uq_financial_review_resolution_raw",
+    ),
+    Index(
+        "uq_financial_review_confirmed_raw",
+        "raw_import_record_id",
+        unique=True,
+        sqlite_where=text("resolution_id IS NOT NULL"),
+        postgresql_where=text("resolution_id IS NOT NULL"),
+    ),
 )
 
 
@@ -1086,6 +1206,12 @@ def configure_mappings() -> None:
             TransformationDecision, transformation_decisions
         ),
         mapper_registry.map_imperatively(TransformationIssue, transformation_issues),
+        mapper_registry.map_imperatively(
+            FinancialReviewResolution, financial_review_resolutions
+        ),
+        mapper_registry.map_imperatively(
+            FinancialReviewRecordLink, financial_review_record_links
+        ),
         mapper_registry.map_imperatively(AcquisitionLot, acquisition_lots),
         mapper_registry.map_imperatively(DisposalEvent, disposal_events),
         mapper_registry.map_imperatively(TradeExecution, trade_executions),
@@ -1111,6 +1237,9 @@ def configure_mappings() -> None:
     sync_mapper = mapper_registry.map_imperatively(IncrementalSyncRun, kraken_sync_runs)
     mapper_registry.map_imperatively(Sale, sales)
     mapper_registry.map_imperatively(Configuration, configurations)
+    mapper_registry.map_imperatively(
+        FinancialReviewSuggestion, financial_review_suggestions
+    )
     for mapper in immutable_mappers:
         event.listen(mapper, "before_update", reject_update)
     event.listen(sync_mapper, "before_update", protect_terminal_sync)

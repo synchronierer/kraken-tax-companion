@@ -197,6 +197,20 @@ test("staking fee review requires an explicit decision and separate tax run", as
   assert.doesNotMatch(source, /tax-review-decisions[\s\S]{0,500}tax-calculations/);
 });
 
+test("financial reviews show suggestions and require an explicit user decision", async () => {
+  const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(source, /Finanzielle Transformationen prüfen/);
+  assert.match(source, /Vorschläge aktualisieren/);
+  assert.match(source, /Vorschläge entscheiden niemals automatisch/);
+  assert.match(source, /Konfidenz/);
+  assert.match(source, /Bestätigen/);
+  assert.match(source, /Ablehnen/);
+  assert.match(source, /Bestätigte Resolution/);
+  assert.match(source, /suggestion\.records\.map\(record=>record\.id\)/);
+  assert.match(source, /\/api\/financial-review-suggestions/);
+  assert.match(source, /\/api\/reviews\/\$\{item\.id\}\/resolve/);
+});
+
 test("export list exposes the independent format version", async () => {
   const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(source, /"format_version"/);

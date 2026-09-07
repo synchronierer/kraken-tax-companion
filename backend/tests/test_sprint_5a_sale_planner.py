@@ -37,12 +37,14 @@ from app.core.tax import (
     TaxJournalEntry,
     TaxReviewCase,
     TaxReviewDecision,
+    TaxReviewDecisionValue,
     TaxRunStatus,
 )
 from app.core.transformation import (
     AcquisitionLot,
     AcquisitionType,
     DisposalEvent,
+    DisposalType,
     TaxTreatmentHint,
     TransformationRun,
     TransformationStatus,
@@ -390,11 +392,34 @@ def _acquisition(asset: str, quantity: str, occurred_at: datetime) -> Acquisitio
     )
 
 
+def _disposal(asset: str, quantity: str, occurred_at: datetime) -> DisposalEvent:
+    key = uuid4().hex
+    return DisposalEvent(
+        stable_key=key,
+        payload_hash=key * 2,
+        asset_raw_code=asset,
+        asset_code=asset,
+        asset_mapping_version="test-v1",
+        quantity=Decimal(quantity),
+        occurred_at=occurred_at,
+        disposal_type=DisposalType.TRADE_SELL,
+        provider="synthetic",
+        account_scope="test",
+        wallet_scope="test-wallet",
+        external_id=key,
+        transformation_version="test-v1",
+        valuation_status=ValuationStatus.VALUATION_REQUIRED,
+        tax_treatment_hint=TaxTreatmentHint.TRADE_DISPOSAL,
+    )
+
+
 def _valuation(
-    lot: AcquisitionLot,
+    lot: AcquisitionLot | DisposalEvent,
     transformation: TransformationRun,
     valuation_run: ValuationRun,
     value: str,
+    *,
+    fee_review_required: bool = False,
 ) -> tuple[ValuationRequirement, ValuationDecision]:
     requirement = ValuationRequirement(
         asset_code=lot.asset_code,
@@ -432,8 +457,16 @@ def _valuation(
         net_quantity=lot.quantity,
         net_acquisition_value_eur=Decimal(value),
         valuation_basis="synthetic",
-        fee_tax_classification=FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE,
-        fee_tax_review_status=FeeTaxReviewStatus.REVIEW_REQUIRED,
+        fee_tax_classification=(
+            FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+            if fee_review_required
+            else FeeTaxClassification.NOT_APPLICABLE
+        ),
+        fee_tax_review_status=(
+            FeeTaxReviewStatus.REVIEW_REQUIRED
+            if fee_review_required
+            else FeeTaxReviewStatus.NOT_REQUIRED
+        ),
     )
     return requirement, decision
 
@@ -533,25 +566,50 @@ def _seed(database: Session) -> None:
             ),
         )
     )
-    staking_fee_decisions = [decisions[0]]
-    for _ in range(379):
+    database.flush()
+    for _ in range(380):
         staking_lot = _acquisition("ETH", "1", NOW - timedelta(days=400))
         requirement, decision = _valuation(
-            staking_lot, transformation, valuation_run, "1"
+            staking_lot,
+            transformation,
+            valuation_run,
+            "1",
+            fee_review_required=True,
         )
         database.add_all((staking_lot, requirement, decision))
-        staking_fee_decisions.append(decision)
-    database.add_all(
-        TaxReviewCase(
+    for _ in range(48):
+        decided_lot = _acquisition("ETH", "1", NOW - timedelta(days=500))
+        requirement, decision = _valuation(
+            decided_lot,
+            transformation,
+            valuation_run,
+            "1",
+            fee_review_required=True,
+        )
+        review_case = TaxReviewCase(
             tax_calculation_run_id=run.id,
             code="tax_staking_platform_fee_candidate_review",
-            message="synthetic open staking fee review",
+            message="synthetic decided staking fee review",
             source_object_type="ValuationDecision",
             source_object_id=decision.id,
             occurred_at=NOW,
         )
-        for decision in staking_fee_decisions
-    )
+        review_decision = TaxReviewDecision(
+            valuation_decision_id=decision.id,
+            source_tax_review_case_id=review_case.id,
+            decision=TaxReviewDecisionValue.EXCLUDE_FROM_WERBUNGSKOSTEN,
+            reason="Synthetic effective decision.",
+            actor_id="test-suite",
+            decided_at=NOW,
+            version=1,
+            batch_id=uuid4(),
+        )
+        database.add_all(
+            (decided_lot, requirement, decision, review_case, review_decision)
+        )
+    ada = _acquisition("ADA", "5", NOW - timedelta(hours=12))
+    ada_requirement, ada_decision = _valuation(ada, transformation, valuation_run, "10")
+    database.add_all((ada, ada_requirement, ada_decision))
     database.add_all(
         (
             FinancialReviewResolution(
@@ -675,8 +733,8 @@ def test_api_quantity_proposal_warnings_and_no_persistence(
     assert body["price_source"] == "MANUAL_SIMULATION"
     assert body["execution_price_guaranteed"] is False
     assert body["exchange_available_quantity"] is None
-    assert body["inventory_quantity"] == "2"
-    assert body["available_inventory_quantity"] == "2"
+    assert body["inventory_quantity"] == "431"
+    assert body["available_inventory_quantity"] == "431"
     assert [item["quantity"] for item in body["fifo_allocations"]] == ["1", "0.5"]
     assert body["tax_data_status"] == "PARTIAL"
     assert body["tax_hint_version"] == "de-bmf-crypto-2025-03-06-v1"
@@ -711,8 +769,8 @@ def test_api_modes_stale_price_and_current_valuation_cost(
         },
     )
     assert all_inventory.status_code == 200
-    assert all_inventory.json()["proposed_quantity"] == "2"
-    assert all_inventory.json()["acquisition_cost_eur"] == "2500"
+    assert all_inventory.json()["proposed_quantity"] == "431"
+    assert all_inventory.json()["acquisition_cost_eur"] == "3928"
     unrelated_usdc = client.post(
         "/api/sale-proposals/simulate",
         json={
@@ -724,6 +782,101 @@ def test_api_modes_stale_price_and_current_valuation_cost(
     )
     assert unrelated_usdc.status_code == 200
     assert unrelated_usdc.json()["inventory_quantity"] == "1"
+
+
+def test_inventory_and_simulation_include_lots_added_after_the_latest_tax_run(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, sessions = sale_api
+    before = _counts(sessions)
+    with sessions() as database:
+        assert database.scalar(select(func.count()).select_from(TaxCalculationRun)) == 2
+        assert (
+            database.scalar(
+                select(func.count())
+                .select_from(InventoryLot)
+                .where(InventoryLot.asset_code == "ADA")
+            )
+            == 0
+        )
+        assert database.scalar(select(func.count()).select_from(TaxReviewCase)) == 48
+        assert (
+            database.scalar(select(func.count()).select_from(TaxReviewDecision)) == 48
+        )
+
+    inventory = client.get("/api/sale-proposals/inventory")
+
+    assert inventory.status_code == 200
+    ada = next(item for item in inventory.json()["items"] if item["asset"] == "ADA")
+    assert ada["inventory_quantity"] == "5"
+    assert ada["blocked"] is False
+    assert "OPEN_STAKING_PLATFORM_FEE_REVIEWS:380" in inventory.json()["warnings"]
+
+    simulation = client.post(
+        "/api/sale-proposals/simulate",
+        json={
+            "asset": "ADA",
+            "mode": "quantity",
+            "quantity": "2",
+            "reference_price_eur": "3",
+        },
+    )
+
+    assert simulation.status_code == 200
+    assert simulation.json()["proposed_quantity"] == "2"
+    assert simulation.json()["inventory_quantity"] == "5"
+    assert simulation.json()["order_created"] is False
+    assert simulation.json()["tax_run_created"] is False
+    assert _counts(sessions) == before
+
+
+def test_current_inventory_applies_existing_disposals_with_tax_fifo(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+) -> None:
+    client, sessions = sale_api
+    with sessions() as database:
+        transformation = database.scalar(select(TransformationRun))
+        valuation_run = database.scalar(select(ValuationRun))
+        assert transformation is not None
+        assert valuation_run is not None
+        acquisition = _acquisition("BTC", "10", NOW - timedelta(days=20))
+        disposal = _disposal("BTC", "3", NOW - timedelta(days=10))
+        acquisition_requirement, acquisition_decision = _valuation(
+            acquisition, transformation, valuation_run, "100"
+        )
+        disposal_requirement, disposal_decision = _valuation(
+            disposal, transformation, valuation_run, "60"
+        )
+        database.add_all(
+            (
+                acquisition,
+                disposal,
+                acquisition_requirement,
+                acquisition_decision,
+                disposal_requirement,
+                disposal_decision,
+            )
+        )
+        database.commit()
+    before = _counts(sessions)
+
+    inventory = client.get("/api/sale-proposals/inventory")
+
+    assert inventory.status_code == 200
+    btc = next(item for item in inventory.json()["items"] if item["asset"] == "BTC")
+    assert btc["inventory_quantity"] == "7"
+    simulation = client.post(
+        "/api/sale-proposals/simulate",
+        json={
+            "asset": "BTC",
+            "mode": "all_available_inventory",
+            "reference_price_eur": "20",
+        },
+    )
+    assert simulation.status_code == 200
+    assert simulation.json()["proposed_quantity"] == "7"
+    assert simulation.json()["acquisition_cost_eur"] == "70"
+    assert _counts(sessions) == before
 
 
 def test_empty_test_database_has_complete_read_only_inventory() -> None:
@@ -785,7 +938,7 @@ def test_empty_test_database_has_complete_read_only_inventory() -> None:
             {
                 "asset": "ETH",
                 "mode": "quantity",
-                "quantity": "3",
+                "quantity": "432",
                 "reference_price_eur": "1",
             },
             409,

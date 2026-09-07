@@ -724,7 +724,7 @@ def _fee_values(
     return values
 
 
-def _tax_inputs(
+def tax_inputs(
     db: Session, period: TaxReportingPeriod
 ) -> tuple[list[AcquisitionInput], list[DisposalInput], list[PendingTaxReview]]:
     decisions = _latest_decisions(db)
@@ -872,7 +872,7 @@ def create_tax_calculation(data: TaxCalculationInput, db: Db) -> dict[str, Any]:
         journal=data.journal_rule_version,
         export=data.export_format_version,
     )
-    acquisitions, disposals, missing = _tax_inputs(db, period)
+    acquisitions, disposals, missing = tax_inputs(db, period)
     snapshot_hash = tax_snapshot_hash(acquisitions, disposals)
     if missing:
         marker = "\n".join(

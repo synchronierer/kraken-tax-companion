@@ -1,5 +1,5 @@
-from datetime import datetime
-from decimal import Decimal, InvalidOperation, localcontext
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.tax import tax_inputs
 from app.core.financial_review import (
     FinancialReviewResolution,
     TaxMappingStatus,
@@ -22,20 +23,20 @@ from app.core.sale_planner import (
     simulate_sale,
 )
 from app.core.tax import (
-    InventoryLot,
-    TaxCalculationRun,
-    TaxReviewCase,
+    NON_INVENTORY_ASSETS,
+    TaxReportingPeriod,
     TaxReviewDecision,
-    TaxRunStatus,
+    TaxRuleVersion,
+    calculate_fifo,
     effective_tax_review_decisions,
 )
 from app.core.time import utc_now
-from app.core.transformation import AcquisitionLot
+from app.core.transformation import AcquisitionLot, DisposalEvent
 from app.core.valuation import (
+    FeeTaxClassification,
     FeeTaxReviewStatus,
     ValuationDecision,
     ValuationDecisionStatus,
-    exact_decimal_multiply,
     exact_decimal_sum,
 )
 from app.database.session import get_session
@@ -78,21 +79,6 @@ class SaleSimulationInput(BaseModel):
         return value
 
 
-def _latest_tax_run(db: Session) -> TaxCalculationRun | None:
-    completed = {
-        TaxRunStatus.COMPLETED,
-        TaxRunStatus.COMPLETED_WITH_REVIEW,
-    }
-    runs = [
-        item
-        for item in db.scalars(select(TaxCalculationRun))
-        if item.status in completed
-    ]
-    if not runs:
-        return None
-    return max(runs, key=lambda item: (item.started_at, item.id.hex))
-
-
 def _latest_valuations(db: Session) -> dict[UUID, ValuationDecision]:
     result: dict[UUID, ValuationDecision] = {}
     for item in db.scalars(select(ValuationDecision)):
@@ -102,64 +88,81 @@ def _latest_valuations(db: Session) -> dict[UUID, ValuationDecision]:
     return result
 
 
-def _proportional_remaining_cost(
-    inventory: InventoryLot, decision: ValuationDecision
-) -> Decimal:
-    full_cost = exact_decimal_sum(
-        (
-            decision.net_acquisition_value_eur or decision.eur_value,
-            inventory.acquisition_fee_eur,
-        )
-    )
-    if inventory.remaining_quantity == inventory.original_quantity:
-        return full_cost
-    with localcontext() as context:
-        context.prec = 80
-        return (
-            exact_decimal_multiply(full_cost, inventory.remaining_quantity)
-            / inventory.original_quantity
-        )
-
-
 def _inventory_snapshot(
-    db: Session,
+    db: Session, *, as_of: datetime
 ) -> tuple[list[SaleInventoryLot], dict[str, Decimal], set[str], set[str]]:
-    known_assets = {
-        item.asset_code.upper() for item in db.scalars(select(AcquisitionLot))
-    }
-    run = _latest_tax_run(db)
-    if run is None:
-        return [], {}, known_assets, set()
-    valuations = _latest_valuations(db)
-    snapshots: list[SaleInventoryLot] = []
-    incomplete: set[str] = set()
-    inventory = [
+    period = TaxReportingPeriod(start=date.min, end=as_of.date())
+    acquisitions, disposals, missing = tax_inputs(db, period)
+    acquisitions = [item for item in acquisitions if item.acquired_at <= as_of]
+    disposals = [item for item in disposals if item.disposed_at <= as_of]
+    fifo = calculate_fifo(
+        run_id=uuid4(),
+        period=period,
+        rules=TaxRuleVersion(),
+        acquisitions=acquisitions,
+        disposals=disposals,
+    )
+    acquisition_lots = [
         item
-        for item in db.scalars(select(InventoryLot))
-        if item.tax_calculation_run_id == run.id and item.remaining_quantity > 0
+        for item in db.scalars(select(AcquisitionLot))
+        if item.occurred_at <= as_of and item.asset_code not in NON_INVENTORY_ASSETS
     ]
-    totals: dict[str, Decimal] = {}
-    for item in inventory:
-        asset = item.asset_code.upper()
-        totals[asset] = exact_decimal_sum(
-            (totals.get(asset, Decimal("0")), item.remaining_quantity)
+    disposal_events = [
+        item
+        for item in db.scalars(select(DisposalEvent))
+        if item.occurred_at <= as_of and item.asset_code not in NON_INVENTORY_ASSETS
+    ]
+    known_assets = {item.asset_code.upper() for item in acquisition_lots}
+    quantity_balances: dict[str, Decimal] = {}
+    for acquisition in acquisition_lots:
+        asset = acquisition.asset_code.upper()
+        quantity_balances[asset] = exact_decimal_sum(
+            (quantity_balances.get(asset, Decimal("0")), acquisition.quantity)
         )
-        decision = valuations.get(item.acquisition_lot_id)
-        if decision is None or decision.status is not ValuationDecisionStatus.RESOLVED:
-            incomplete.add(asset)
-            continue
-        snapshots.append(
-            SaleInventoryLot(
-                inventory_lot_id=item.id,
-                acquisition_lot_id=item.acquisition_lot_id,
-                valuation_decision_id=decision.id,
-                asset=item.asset_code,
-                remaining_quantity=item.remaining_quantity,
-                remaining_cost_eur=_proportional_remaining_cost(item, decision),
-                acquired_at=item.acquired_at,
-                sequence=item.sequence,
+    for disposal in disposal_events:
+        asset = disposal.asset_code.upper()
+        quantity_balances[asset] = exact_decimal_sum(
+            (
+                quantity_balances.get(asset, Decimal("0")),
+                disposal.quantity.copy_negate(),
             )
         )
+    incomplete = {
+        item.asset_code.upper()
+        for item in missing
+        if item.code == "tax_valuation_missing"
+        and item.source_type in {"AcquisitionLot", "DisposalEvent"}
+        and item.occurred_at <= as_of
+    }
+    insufficient_disposals = {item.source_object_id for item in fifo.reviews}
+    incomplete.update(
+        item.asset_code
+        for item in disposals
+        if item.disposal_id in insufficient_disposals
+    )
+    snapshots = [
+        SaleInventoryLot(
+            inventory_lot_id=item.id,
+            acquisition_lot_id=item.acquisition_lot_id,
+            valuation_decision_id=item.valuation_decision_id,
+            asset=item.asset_code,
+            remaining_quantity=item.remaining_quantity,
+            remaining_cost_eur=item.remaining_cost_eur,
+            acquired_at=item.acquired_at,
+            sequence=item.sequence,
+        )
+        for item in fifo.lots
+        if item.remaining_quantity > 0
+    ]
+    totals: dict[str, Decimal] = {}
+    for item in snapshots:
+        totals[item.asset] = exact_decimal_sum(
+            (totals.get(item.asset, Decimal("0")), item.remaining_quantity)
+        )
+    for asset in incomplete:
+        quantity = quantity_balances.get(asset, Decimal("0"))
+        if quantity > 0:
+            totals[asset] = quantity
     return snapshots, totals, known_assets, incomplete
 
 
@@ -183,35 +186,19 @@ def _pending_resolutions(
 def _tax_context(
     db: Session,
 ) -> tuple[str, tuple[str, ...], set[str]]:
-    run = _latest_tax_run(db)
     effective = effective_tax_review_decisions(
         list(db.scalars(select(TaxReviewDecision)))
     )
-    staking_open = 0
-    if run is not None:
-        cases = [
-            item
-            for item in db.scalars(select(TaxReviewCase))
-            if item.tax_calculation_run_id == run.id
-            and item.code == "tax_staking_platform_fee_candidate_review"
-        ]
-        valuation_ids = {
-            item.source_object_id
-            for item in cases
-            if item.source_object_type == "ValuationDecision"
-        }
-        decisions = {
-            item.id: item
-            for item in db.scalars(select(ValuationDecision))
-            if item.id in valuation_ids
-        }
-        staking_open = sum(
-            1
-            for item in cases
-            if item.source_object_id not in effective
-            and (decision := decisions.get(item.source_object_id)) is not None
-            and decision.fee_tax_review_status is FeeTaxReviewStatus.REVIEW_REQUIRED
-        )
+    current_decisions = _latest_valuations(db).values()
+    staking_open = sum(
+        1
+        for decision in current_decisions
+        if decision.status is ValuationDecisionStatus.RESOLVED
+        and decision.fee_tax_classification
+        is FeeTaxClassification.WERBUNGSKOSTEN_CANDIDATE
+        and decision.fee_tax_review_status is FeeTaxReviewStatus.REVIEW_REQUIRED
+        and decision.id not in effective
+    )
     pending_count, withdrawal_count, restricted = _pending_resolutions(db)
     warnings: list[str] = []
     if staking_open:
@@ -229,7 +216,7 @@ def _error(status: int, code: str, message: str) -> HTTPException:
 
 @router.get("/inventory")
 def sale_inventory(db: Db) -> dict[str, Any]:
-    _, totals, _, incomplete = _inventory_snapshot(db)
+    _, totals, _, incomplete = _inventory_snapshot(db, as_of=utc_now())
     tax_status, warnings, restricted = _tax_context(db)
     return {
         "items": [
@@ -258,7 +245,8 @@ def sale_inventory(db: Db) -> dict[str, Any]:
 def simulate(data: SaleSimulationInput, db: Db) -> dict[str, Any]:
     if data.asset == "EUR":
         raise _error(422, "EUR_CRYPTO_SALE_NOT_ALLOWED", "EUR ist kein Crypto-Sale.")
-    lots, _, known_assets, incomplete = _inventory_snapshot(db)
+    now = utc_now()
+    lots, _, known_assets, incomplete = _inventory_snapshot(db, as_of=now)
     if data.asset not in known_assets:
         raise _error(404, "UNKNOWN_ASSET", "Das Asset ist im Steuerbestand unbekannt.")
     tax_status, warnings, restricted = _tax_context(db)
@@ -274,7 +262,6 @@ def simulate(data: SaleSimulationInput, db: Db) -> dict[str, Any]:
             "INCOMPLETE_ASSET_VALUATION",
             "Für das Asset liegt keine vollständige aktuelle Bewertung vor.",
         )
-    now = utc_now()
     try:
         request = SaleProposalRequest(
             asset=data.asset,

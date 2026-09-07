@@ -16,6 +16,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from app.adapters.kraken.assets import normalize_kraken_asset
+from app.core.valuation import exact_decimal_sum
+
 
 class KrakenPrivateError(Exception):
     def __init__(self, code: str, message: str, *, temporary: bool = False) -> None:
@@ -129,6 +132,27 @@ class LedgerPreview:
     records: tuple[LedgerEntry, ...]
 
 
+@dataclass(frozen=True, kw_only=True)
+class KrakenExtendedBalance:
+    provider_asset_code: str
+    canonical_asset: str | None
+    balance: Decimal
+    credit: Decimal
+    credit_used: Decimal
+    hold_trade: Decimal
+    calculated_available: Decimal
+    extension: str | None
+    balance_kind: str
+    provider_metadata: Mapping[str, object]
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExchangeBalanceSnapshot:
+    fetched_at: datetime
+    balances: tuple[KrakenExtendedBalance, ...]
+    warnings: tuple[str, ...]
+
+
 _KNOWN_TYPES = {
     "adjustment",
     "credit",
@@ -158,6 +182,7 @@ _KNOWN_SUBTYPES = {
 
 class KrakenPrivateClient:
     ledger_path = "/0/private/Ledgers"
+    balance_path = "/0/private/BalanceEx"
 
     def __init__(
         self,
@@ -248,7 +273,7 @@ class KrakenPrivateClient:
                 if not isinstance(errors, list):
                     raise ValueError("error")
                 if errors:
-                    self._raise_api_error(errors)
+                    self._raise_api_error(errors, path=path)
                 result = parsed.get("result")
                 if not isinstance(result, dict):
                     raise ValueError("result")
@@ -341,7 +366,7 @@ class KrakenPrivateClient:
             )
 
     @staticmethod
-    def _raise_api_error(errors: list[object]) -> None:
+    def _raise_api_error(errors: list[object], *, path: str) -> None:
         labels = " ".join(item for item in errors if isinstance(item, str)).lower()
         if "invalid key" in labels or "invalid signature" in labels:
             code, message = (
@@ -349,10 +374,16 @@ class KrakenPrivateClient:
                 "Kraken hat die Zugangsdaten abgelehnt.",
             )
         elif "permission denied" in labels:
-            code, message = (
-                "kraken_ledger_permission_missing",
-                "Dem Kraken-Schlüssel fehlt die Ledger-Leseberechtigung.",
-            )
+            if path == KrakenPrivateClient.balance_path:
+                code, message = (
+                    "kraken_balance_permission_missing",
+                    "Dem Kraken-Schlüssel fehlt die Funds-Query-Berechtigung.",
+                )
+            else:
+                code, message = (
+                    "kraken_ledger_permission_missing",
+                    "Dem Kraken-Schlüssel fehlt die Ledger-Leseberechtigung.",
+                )
         elif "invalid nonce" in labels:
             code, message = "kraken_invalid_nonce", "Kraken hat die Nonce abgelehnt."
         elif "rate limit" in labels or "too many requests" in labels:
@@ -363,9 +394,74 @@ class KrakenPrivateClient:
         else:
             code, message = (
                 "kraken_api_error",
-                "Kraken konnte die Ledger-Anfrage nicht verarbeiten.",
+                (
+                    "Kraken konnte die BalanceEx-Anfrage nicht verarbeiten."
+                    if path == KrakenPrivateClient.balance_path
+                    else "Kraken konnte die Ledger-Anfrage nicht verarbeiten."
+                ),
             )
         raise KrakenPrivateError(code, message, temporary=code == "kraken_rate_limited")
+
+    def extended_balance(self) -> ExchangeBalanceSnapshot:
+        result = self._private_post(self.balance_path, {})
+        balances: list[KrakenExtendedBalance] = []
+        warnings: set[str] = set()
+        for provider_code, raw in result.items():
+            if not isinstance(raw, dict):
+                raise KrakenPrivateError(
+                    "kraken_invalid_response",
+                    "Kraken lieferte ungültige BalanceEx-Daten.",
+                )
+            try:
+                components = {
+                    name: Decimal(str(raw.get(name, "0")))
+                    for name in ("balance", "credit", "credit_used", "hold_trade")
+                }
+                if not all(value.is_finite() for value in components.values()):
+                    raise ValueError("non-finite balance")
+            except (InvalidOperation, ValueError) as error:
+                raise KrakenPrivateError(
+                    "kraken_invalid_response",
+                    "Kraken lieferte ungültige BalanceEx-Daten.",
+                ) from error
+            identity = normalize_kraken_asset(provider_code)
+            canonical = identity.normalized_asset if identity.is_unambiguous else None
+            extension = identity.product_variant
+            if canonical is None:
+                warnings.add("KRAKEN_UNKNOWN_ASSET_CODE")
+            if extension is not None:
+                warnings.add("KRAKEN_NON_SPOT_BALANCE_PRESENT")
+            available = exact_decimal_sum(
+                (
+                    components["balance"],
+                    components["credit"],
+                    components["credit_used"].copy_negate(),
+                    components["hold_trade"].copy_negate(),
+                )
+            )
+            balances.append(
+                KrakenExtendedBalance(
+                    provider_asset_code=provider_code,
+                    canonical_asset=canonical,
+                    balance=components["balance"],
+                    credit=components["credit"],
+                    credit_used=components["credit_used"],
+                    hold_trade=components["hold_trade"],
+                    calculated_available=available,
+                    extension=extension,
+                    balance_kind="spot" if extension is None else "non_spot",
+                    provider_metadata={
+                        str(key): value
+                        for key, value in raw.items()
+                        if key not in {"balance", "credit", "credit_used", "hold_trade"}
+                    },
+                )
+            )
+        return ExchangeBalanceSnapshot(
+            fetched_at=datetime.now(UTC),
+            balances=tuple(sorted(balances, key=lambda item: item.provider_asset_code)),
+            warnings=tuple(sorted(warnings)),
+        )
 
     def ledger_preview(
         self,

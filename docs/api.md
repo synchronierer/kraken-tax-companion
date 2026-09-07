@@ -6,8 +6,15 @@
   read-only planner and keeps exchange availability separate.
 - `POST /api/sale-proposals/simulate` performs a stateless FIFO dry-run using an
   explicitly supplied manual reference price.
+- `GET /api/sale-proposals/live-context?asset=ADA` combines the current
+  stateless FIFO inventory with a read-only Kraken `BalanceEx` snapshot and a
+  public direct-EUR best-bid quote.
+- `POST /api/sale-proposals/simulate-live` performs the same stateless FIFO
+  dry-run with the Kraken best bid and limits the simulated quantity to the
+  lower of documented inventory and available Kraken spot balance.
 
-See [Sprint 5A sale planner](sprint-5a-sale-planner.md) for the safety and tax
+See [Sprint 5A sale planner](sprint-5a-sale-planner.md) and
+[Sprint 5B live context](sprint-5b-live-context.md) for the safety and tax
 semantics.
 
 ## Steuerliche Reviewentscheidungen

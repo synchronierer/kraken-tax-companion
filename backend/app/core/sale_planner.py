@@ -139,7 +139,7 @@ class SaleSimulation:
     target_eur: Decimal | None
     inventory_quantity: Decimal
     available_inventory_quantity: Decimal
-    exchange_available_quantity: None
+    exchange_available_quantity: Decimal | None
     proposed_quantity: Decimal
     reference_price_eur: Decimal
     price_source: str
@@ -212,6 +212,8 @@ def simulate_sale(
     now: datetime,
     tax_data_status: str,
     tax_warnings: tuple[str, ...] = (),
+    exchange_available_quantity: Decimal | None = None,
+    exchange_reconciled: bool = False,
 ) -> SaleSimulation:
     calculated_at = require_utc(now)
     relevant = sorted(
@@ -233,6 +235,27 @@ def simulate_sale(
         )
     else:
         proposed_quantity = cast(Decimal, request.quantity)
+    if exchange_available_quantity is not None:
+        if exchange_available_quantity < 0:
+            raise SaleProposalError(
+                "EXCHANGE_BALANCE_UNAVAILABLE",
+                "Der verfügbare Exchange-Bestand ist ungültig.",
+            )
+        if (
+            request.mode is SaleMode.ALL_AVAILABLE_INVENTORY
+            and exchange_available_quantity < proposed_quantity
+        ):
+            proposed_quantity = exchange_available_quantity
+        elif proposed_quantity > exchange_available_quantity:
+            raise SaleProposalError(
+                "INSUFFICIENT_EXCHANGE_AVAILABLE_BALANCE",
+                "Die Verkaufsmenge übersteigt den verfügbaren Exchange-Spot-Bestand.",
+            )
+    if proposed_quantity <= 0:
+        raise SaleProposalError(
+            "INSUFFICIENT_EXCHANGE_AVAILABLE_BALANCE",
+            "Auf dem Exchange ist kein verfügbarer Spot-Bestand vorhanden.",
+        )
     if proposed_quantity > inventory_quantity:
         raise SaleProposalError(
             "INSUFFICIENT_FIFO_INVENTORY",
@@ -319,7 +342,10 @@ def simulate_sale(
     price_age = max(
         0, int((calculated_at - request.reference_price.timestamp).total_seconds())
     )
-    warnings = ["EXCHANGE_BALANCE_NOT_RECONCILED", *tax_warnings]
+    warnings = [
+        *(() if exchange_reconciled else ("EXCHANGE_BALANCE_NOT_RECONCILED",)),
+        *tax_warnings,
+    ]
     if fee is None:
         warnings.append("ESTIMATED_FEE_UNKNOWN")
     if price_age > PRICE_STALE_AFTER_SECONDS:
@@ -332,8 +358,12 @@ def simulate_sale(
         requested_quantity=request.quantity,
         target_eur=request.target_eur,
         inventory_quantity=inventory_quantity,
-        available_inventory_quantity=inventory_quantity,
-        exchange_available_quantity=None,
+        available_inventory_quantity=(
+            min(inventory_quantity, exchange_available_quantity)
+            if exchange_available_quantity is not None
+            else inventory_quantity
+        ),
+        exchange_available_quantity=exchange_available_quantity,
         proposed_quantity=proposed_quantity,
         reference_price_eur=request.reference_price.price_eur,
         price_source=request.reference_price.source,

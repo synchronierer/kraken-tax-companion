@@ -11,7 +11,9 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.api import sale_proposals as sale_proposals_api
 from app.api.sale_proposals import sale_inventory
+from app.config.settings import Settings
 from app.core.financial_review import (
     FinancialReviewResolution,
     FinancialReviewType,
@@ -64,6 +66,12 @@ from app.core.valuation import (
 )
 from app.database.base import Base
 from app.database.session import get_session
+from app.infrastructure.kraken_market import KrakenMarketError, KrakenMarketQuote
+from app.infrastructure.kraken_private import (
+    ExchangeBalanceSnapshot,
+    KrakenExtendedBalance,
+    KrakenPrivateError,
+)
 from app.main import app
 
 NOW = datetime(2026, 9, 6, 12, tzinfo=UTC)
@@ -1066,9 +1074,427 @@ def test_source_has_no_exchange_write_client_or_order_route() -> None:
         "cancelorder",
         "editorder",
         '"/0/private/withdraw"',
-        "kraken_private",
+        '"/0/private/deposit',
+        '"/0/private/transfer',
         "taxcalculationrun(",
         "db.add(",
         "db.commit(",
     ):
         assert forbidden not in sources
+
+
+class _BalanceClient:
+    def __init__(
+        self,
+        snapshot: ExchangeBalanceSnapshot | None = None,
+        error: KrakenPrivateError | None = None,
+    ) -> None:
+        self.snapshot = snapshot
+        self.error = error
+
+    def extended_balance(self) -> ExchangeBalanceSnapshot:
+        if self.error is not None:
+            raise self.error
+        assert self.snapshot is not None
+        return self.snapshot
+
+
+class _MarketClient:
+    def __init__(
+        self,
+        quote: KrakenMarketQuote | None = None,
+        error: KrakenMarketError | None = None,
+    ) -> None:
+        self.quote = quote
+        self.error = error
+
+    def eur_quote(self, asset: str) -> KrakenMarketQuote:
+        if self.error is not None:
+            raise self.error
+        assert self.quote is not None
+        assert self.quote.asset == asset
+        return self.quote
+
+
+def _extended_balance(
+    *,
+    provider_code: str,
+    asset: str | None,
+    balance: str,
+    available: str,
+    extension: str | None = None,
+) -> KrakenExtendedBalance:
+    return KrakenExtendedBalance(
+        provider_asset_code=provider_code,
+        canonical_asset=asset,
+        balance=Decimal(balance),
+        credit=Decimal("0"),
+        credit_used=Decimal("0"),
+        hold_trade=Decimal(balance) - Decimal(available),
+        calculated_available=Decimal(available),
+        extension=extension,
+        balance_kind="non_spot" if extension else "spot",
+        provider_metadata={},
+    )
+
+
+def _snapshot(
+    *, spot_balance: str = "430", non_spot_balance: str = "1"
+) -> ExchangeBalanceSnapshot:
+    return ExchangeBalanceSnapshot(
+        fetched_at=NOW,
+        balances=(
+            _extended_balance(
+                provider_code="XETH",
+                asset="ETH",
+                balance=spot_balance,
+                available=spot_balance,
+            ),
+            _extended_balance(
+                provider_code="ETH.B",
+                asset="ETH",
+                balance=non_spot_balance,
+                available=non_spot_balance,
+                extension="B",
+            ),
+            _extended_balance(
+                provider_code="?",
+                asset=None,
+                balance="2",
+                available="2",
+            ),
+        ),
+        warnings=("KRAKEN_NON_SPOT_BALANCE_PRESENT", "KRAKEN_UNKNOWN_ASSET_CODE"),
+    )
+
+
+def _quote(*, asset: str = "ETH", bid: str = "3") -> KrakenMarketQuote:
+    return KrakenMarketQuote(
+        asset=asset,
+        quote_asset="EUR",
+        pair=f"{asset}EUR",
+        best_bid_eur=Decimal(bid),
+        best_ask_eur=Decimal("3.1"),
+        last_trade_eur=Decimal("2.9"),
+        selected_reference_price_eur=Decimal(bid),
+        selected_reference="KRAKEN_BEST_BID",
+        fetched_at=NOW,
+    )
+
+
+def _install_live_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    balance: _BalanceClient | None = None,
+    market: _MarketClient | None = None,
+) -> None:
+    monkeypatch.setattr(
+        sale_proposals_api,
+        "build_balance_client",
+        lambda settings: balance or _BalanceClient(_snapshot()),
+    )
+    monkeypatch.setattr(
+        sale_proposals_api,
+        "build_market_client",
+        lambda settings: market or _MarketClient(_quote()),
+    )
+
+
+def test_live_context_reconciles_spot_non_spot_and_preserves_tax_warnings(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, sessions = sale_api
+    before = _counts(sessions)
+    _install_live_fakes(monkeypatch)
+
+    response = client.get("/api/sale-proposals/live-context?asset=eth")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["asset"] == "ETH"
+    assert body["inventory_quantity"] == "431"
+    assert body["exchange_total_balance"] == "431"
+    assert body["exchange_spot_available_quantity"] == "430"
+    assert body["exchange_non_spot_balance"] == "1"
+    assert body["inventory_exchange_difference"] == "0"
+    assert body["reconciliation_status"] == "MATCH"
+    assert body["safe_simulatable_quantity"] == "430"
+    assert body["reference_price_eur"] == "3"
+    assert body["best_ask_eur"] == "3.1"
+    assert body["last_trade_eur"] == "2.9"
+    assert body["price_source"] == "KRAKEN_BEST_BID"
+    assert body["execution_price_guaranteed"] is False
+    assert body["balance_permission_available"] is True
+    assert len(body["balance_details"]) == 3
+    assert "KRAKEN_NON_SPOT_BALANCE_PRESENT" in body["warnings"]
+    assert "KRAKEN_UNKNOWN_ASSET_CODE" in body["warnings"]
+    assert "OPEN_STAKING_PLATFORM_FEE_REVIEWS:380" in body["warnings"]
+    assert "PENDING_FINANCIAL_TAX_MAPPINGS:1" in body["warnings"]
+    assert "OPEN_WITHDRAWAL_FEE_TAX_REVIEWS:1" in body["warnings"]
+    assert _counts(sessions) == before
+
+
+@pytest.mark.parametrize(
+    ("spot", "non_spot", "difference"),
+    [("429", "1", "1"), ("431", "1", "-1")],
+)
+def test_live_context_reports_both_inventory_difference_directions(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+    spot: str,
+    non_spot: str,
+    difference: str,
+) -> None:
+    _install_live_fakes(
+        monkeypatch,
+        balance=_BalanceClient(_snapshot(spot_balance=spot, non_spot_balance=non_spot)),
+    )
+    response = sale_api[0].get("/api/sale-proposals/live-context?asset=ETH")
+    assert response.status_code == 200
+    assert response.json()["difference_quantity"] == difference
+    assert response.json()["reconciliation_status"] == "DIFFERENCE"
+    assert "EXCHANGE_INVENTORY_DIFFERENCE" in response.json()["warnings"]
+
+
+@pytest.mark.parametrize(
+    ("code", "warning", "permission"),
+    [
+        (
+            "kraken_not_configured",
+            "KRAKEN_API_KEY_NOT_CONFIGURED",
+            False,
+        ),
+        (
+            "kraken_balance_permission_missing",
+            "KRAKEN_BALANCE_PERMISSION_MISSING",
+            False,
+        ),
+        ("kraken_authentication_failed", "KRAKEN_AUTHENTICATION_FAILED", False),
+        ("kraken_rate_limited", "KRAKEN_RATE_LIMITED", False),
+        ("kraken_invalid_response", "KRAKEN_BALANCE_INVALID_RESPONSE", False),
+        ("kraken_unavailable", "EXCHANGE_BALANCE_UNAVAILABLE", False),
+    ],
+)
+def test_live_context_keeps_market_quote_when_balance_is_unavailable(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    warning: str,
+    permission: bool,
+) -> None:
+    _install_live_fakes(
+        monkeypatch,
+        balance=_BalanceClient(error=KrakenPrivateError(code, "expected")),
+    )
+    response = sale_api[0].get("/api/sale-proposals/live-context?asset=ETH")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exchange_balance_available"] is False
+    assert body["balance_permission_available"] is permission
+    assert body["reconciliation_status"] == "UNKNOWN"
+    assert body["difference_quantity"] is None
+    assert body["price_available"] is True
+    assert warning in body["warnings"]
+    assert "EXCHANGE_BALANCE_UNAVAILABLE" in body["warnings"]
+
+
+def test_live_context_reports_unavailable_eur_pair_and_unknown_asset(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_live_fakes(
+        monkeypatch,
+        market=_MarketClient(
+            error=KrakenMarketError("kraken_eur_pair_unavailable", "missing")
+        ),
+    )
+    response = sale_api[0].get("/api/sale-proposals/live-context?asset=ETH")
+    assert response.status_code == 200
+    assert response.json()["price_available"] is False
+    assert "KRAKEN_EUR_PAIR_UNAVAILABLE" in response.json()["warnings"]
+    unknown = sale_api[0].get("/api/sale-proposals/live-context?asset=ZZZ")
+    assert unknown.status_code == 404
+    invalid = sale_api[0].get("/api/sale-proposals/live-context?asset=ETH.B")
+    assert invalid.status_code == 422
+
+
+def test_live_context_blocks_incomplete_asset_and_client_factories_are_read_only(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    balance_client = sale_proposals_api.build_balance_client(
+        Settings(kraken_api_key="query-key", kraken_api_secret="c2VjcmV0")
+    )
+    market_client = sale_proposals_api.build_market_client(Settings())
+    assert balance_client.balance_path == "/0/private/BalanceEx"
+    assert market_client.asset_pairs_path == "/0/public/AssetPairs"
+
+    xrp_balance = ExchangeBalanceSnapshot(
+        fetched_at=NOW,
+        balances=(
+            _extended_balance(
+                provider_code="XRP", asset="XRP", balance="1", available="1"
+            ),
+        ),
+        warnings=(),
+    )
+    _install_live_fakes(
+        monkeypatch,
+        balance=_BalanceClient(xrp_balance),
+        market=_MarketClient(_quote(asset="XRP")),
+    )
+    response = sale_api[0].get("/api/sale-proposals/live-context?asset=XRP")
+    assert response.status_code == 200
+    assert response.json()["blocked_reasons"] == ["INCOMPLETE_ASSET_VALUATION"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_quantity"),
+    [
+        ({"asset": "ETH", "mode": "quantity", "quantity": "2"}, "2"),
+        ({"asset": "ETH", "mode": "target_eur", "target_eur": "6"}, "2"),
+        ({"asset": "ETH", "mode": "all_available_inventory"}, "3"),
+    ],
+)
+def test_live_simulation_modes_use_bid_and_safe_exchange_max_without_persistence(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, str],
+    expected_quantity: str,
+) -> None:
+    client, sessions = sale_api
+    before = _counts(sessions)
+    _install_live_fakes(
+        monkeypatch,
+        balance=_BalanceClient(_snapshot(spot_balance="3", non_spot_balance="1")),
+    )
+    response = client.post("/api/sale-proposals/simulate-live", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["proposed_quantity"] == expected_quantity
+    assert body["reference_price_eur"] == "3"
+    assert body["price_source"] == "KRAKEN_BEST_BID"
+    assert body["exchange_available_quantity"] == "3"
+    assert body["safe_simulatable_quantity"] == "3"
+    assert body["dry_run"] is True
+    assert body["order_created"] is False
+    assert body["exchange_mutated"] is False
+    assert body["tax_run_created"] is False
+    assert body["execution_price_guaranteed"] is False
+    assert "EXCHANGE_BALANCE_NOT_RECONCILED" not in body["warnings"]
+    assert "OPEN_STAKING_PLATFORM_FEE_REVIEWS:380" in body["warnings"]
+    assert _counts(sessions) == before
+
+
+@pytest.mark.parametrize(
+    ("balance", "payload", "status", "code"),
+    [
+        (
+            _BalanceClient(_snapshot(spot_balance="1", non_spot_balance="0")),
+            {"asset": "ETH", "mode": "quantity", "quantity": "2"},
+            409,
+            "INSUFFICIENT_EXCHANGE_AVAILABLE_BALANCE",
+        ),
+        (
+            _BalanceClient(_snapshot(spot_balance="500", non_spot_balance="0")),
+            {"asset": "ETH", "mode": "quantity", "quantity": "432"},
+            409,
+            "INSUFFICIENT_FIFO_INVENTORY",
+        ),
+        (
+            _BalanceClient(error=KrakenPrivateError("kraken_unavailable", "offline")),
+            {"asset": "ETH", "mode": "quantity", "quantity": "1"},
+            503,
+            "EXCHANGE_BALANCE_UNAVAILABLE",
+        ),
+    ],
+)
+def test_live_simulation_blocks_unsafe_quantities_and_missing_balance(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+    balance: _BalanceClient,
+    payload: dict[str, str],
+    status: int,
+    code: str,
+) -> None:
+    _install_live_fakes(monkeypatch, balance=balance)
+    response = sale_api[0].post("/api/sale-proposals/simulate-live", json=payload)
+    assert response.status_code == status
+    assert response.json()["detail"]["code"] == code
+
+
+def test_live_simulation_blocks_missing_price_and_financial_mapping(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_live_fakes(
+        monkeypatch,
+        market=_MarketClient(error=KrakenMarketError("kraken_unavailable", "offline")),
+    )
+    no_price = sale_api[0].post(
+        "/api/sale-proposals/simulate-live",
+        json={"asset": "ETH", "mode": "quantity", "quantity": "1"},
+    )
+    assert no_price.status_code == 503
+    assert no_price.json()["detail"]["code"] == "KRAKEN_PRICE_UNAVAILABLE"
+
+    _install_live_fakes(
+        monkeypatch,
+        balance=_BalanceClient(
+            ExchangeBalanceSnapshot(
+                fetched_at=NOW,
+                balances=(
+                    _extended_balance(
+                        provider_code="ETHW",
+                        asset="ETHW",
+                        balance="1",
+                        available="1",
+                    ),
+                ),
+                warnings=(),
+            )
+        ),
+        market=_MarketClient(_quote(asset="ETHW")),
+    )
+    ethw = sale_api[0].post(
+        "/api/sale-proposals/simulate-live",
+        json={"asset": "ETHW", "mode": "quantity", "quantity": "1"},
+    )
+    assert ethw.status_code == 409
+    assert ethw.json()["detail"]["code"] == "UNRESOLVED_FINANCIAL_TAX_MAPPING"
+
+
+def test_live_simulation_request_shape_and_zero_exchange_are_conservative(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_live_fakes(
+        monkeypatch,
+        balance=_BalanceClient(_snapshot(spot_balance="0", non_spot_balance="1")),
+    )
+    zero = sale_api[0].post(
+        "/api/sale-proposals/simulate-live",
+        json={"asset": "ETH", "mode": "all_available_inventory"},
+    )
+    assert zero.status_code == 409
+    assert zero.json()["detail"]["code"] == "INSUFFICIENT_EXCHANGE_AVAILABLE_BALANCE"
+    invalid = sale_api[0].post(
+        "/api/sale-proposals/simulate-live",
+        json={"asset": "", "mode": "quantity", "quantity": "1"},
+    )
+    assert invalid.status_code == 422
+
+
+def test_core_live_simulation_rejects_negative_exchange_quantity() -> None:
+    with pytest.raises(SaleProposalError) as raised:
+        simulate_sale(
+            simulation_id=uuid4(),
+            request=proposal(SaleMode.QUANTITY, quantity="1"),
+            lots=[inventory_lot("2", "100", NOW - timedelta(days=2))],
+            now=NOW,
+            tax_data_status="COMPLETE",
+            exchange_available_quantity=Decimal("-1"),
+            exchange_reconciled=True,
+        )
+    assert raised.value.code == "EXCHANGE_BALANCE_UNAVAILABLE"

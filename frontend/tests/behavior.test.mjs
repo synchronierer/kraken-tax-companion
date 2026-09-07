@@ -236,9 +236,16 @@ test("sale planner is explicitly dry-run only and validates decimal input", asyn
   assert.match(source, /Verkauf planen/);
   assert.match(source, /KEINE ORDER – NUR SIMULATION/);
   assert.match(source, /\/api\/sale-proposals\/simulate/);
-  assert.match(source, /Exchange-Bestand noch nicht abgeglichen/);
+  assert.match(source, /Differenz Steuerbestand\/Kraken/);
   assert.match(source, /kein garantierter Ausführungspreis/);
-  assert.match(source, /Verkauf simulieren/);
+  assert.match(source, /Manuell simulieren/);
+  assert.match(source, /Live-Daten laden/);
+  assert.match(source, /Mit Kraken-Referenzpreis simulieren/);
+  assert.match(source, /Kraken verfügbarer Spot-Bestand/);
+  assert.match(source, /Nicht-Spot-\/Earn-Bestand/);
+  assert.match(source, /Kraken Best Bid EUR/);
+  assert.match(source, /\/api\/sale-proposals\/live-context/);
+  assert.match(source, /\/api\/sale-proposals\/simulate-live/);
   assert.doesNotMatch(source, />Kaufen<|>Verkaufen<|>Order senden</);
   const valid = {
     asset: "ETH", mode: "quantity", quantity: "0.01", targetEur: "",

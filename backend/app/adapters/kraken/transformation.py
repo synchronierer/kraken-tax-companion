@@ -2,7 +2,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
@@ -39,6 +39,7 @@ from app.core.transformation import (
     ValuationStatus,
 )
 from app.core.unit_of_work import UnitOfWork
+from app.imports.hashing import canonical_sha256
 from app.transformations.state_machine import transition_transformation
 
 INTERNAL_SUBTYPES = frozenset(
@@ -336,58 +337,307 @@ class KrakenTransformationService:
                 conflict=True,
             )
             return
-        event_kind = (
-            AcquisitionType.TRADE_BUY if values["type"].lower() == "receive" else None
+        spend = next(item for item in group if _values(item)["type"].lower() == "spend")
+        receive = next(
+            item for item in group if _values(item)["type"].lower() == "receive"
         )
-        if event_kind is None:
-            self._decision(
+        spend_values = _values(spend)
+        receive_values = _values(receive)
+        spend_asset = _record_asset(
+            spend, spend_values.get("asset", ""), run.contract_version
+        )
+        receive_asset = _record_asset(
+            receive, receive_values.get("asset", ""), run.contract_version
+        )
+        try:
+            spend_amount = Decimal(spend_values.get("amount", ""))
+            receive_amount = Decimal(receive_values.get("amount", ""))
+            spend_fee = Decimal(spend_values.get("fee", "0"))
+            receive_fee = Decimal(receive_values.get("fee", "0"))
+            values_valid = all(
+                value.is_finite()
+                for value in (spend_amount, receive_amount, spend_fee, receive_fee)
+            )
+        except InvalidOperation:
+            values_valid = False
+            spend_amount = receive_amount = spend_fee = receive_fee = Decimal("0")
+        group_valid = (
+            bool(values.get("refid"))
+            and spend_values.get("refid") == receive_values.get("refid")
+            and spend_amount < 0
+            and receive_amount > 0
+            and spend_fee >= 0
+            and receive_fee >= 0
+            and values_valid
+            and spend_asset.canonical_code is not None
+            and receive_asset.canonical_code is not None
+            and not (
+                spend_asset.canonical_code in FIAT_ASSETS
+                and receive_asset.canonical_code in FIAT_ASSETS
+            )
+        )
+        if not group_valid:
+            if record.id == receive.id:
+                self._review(
+                    unit,
+                    run,
+                    record,
+                    counters,
+                    problems,
+                    "ledger_exchange_group_invalid",
+                )
+            else:
+                self._decision(
+                    unit,
+                    run,
+                    record,
+                    DecisionType.REVIEW_REQUIRED,
+                    "ledger_exchange_group_invalid",
+                    "The linked instant-exchange ledger group requires review.",
+                )
+            return
+        if record.id != receive.id:
+            return
+
+        spent = spend_asset.canonical_code
+        received = receive_asset.canonical_code
+        assert spent is not None and received is not None
+        reference = receive_values["refid"]
+        payload_hash = canonical_sha256(
+            {"record_hashes": sorted(item.content_hash for item in group)}
+        )
+        acquisition_stable = self._stable(
+            receive, "ledger-acquisition", run.contract_version
+        )
+        disposal_stable = self._stable(spend, "ledger-disposal", run.contract_version)
+        existing_acquisition = (
+            unit.acquisitions.find_by_stable_key(acquisition_stable)
+            if received not in FIAT_ASSETS
+            else None
+        )
+        existing_disposal = (
+            unit.disposals.find_by_stable_key(disposal_stable)
+            if spent not in FIAT_ASSETS
+            else None
+        )
+        if (
+            existing_acquisition is not None
+            and existing_acquisition.payload_hash != payload_hash
+        ) or (
+            existing_disposal is not None
+            and existing_disposal.payload_hash != payload_hash
+        ):
+            self._review(
                 unit,
                 run,
                 record,
-                DecisionType.DOMAIN_EVENT_CREATED,
-                "ledger_group_disposal",
-                "Ledger spend is linked to the grouped instant exchange.",
+                counters,
+                problems,
+                "external_id_payload_conflict",
+                conflict=True,
             )
             return
-        asset = _record_asset(record, values["asset"], run.contract_version)
-        if asset.canonical_code is None:
-            self._review(unit, run, record, counters, problems, "asset_alias_unknown")
-            return
-        amount = abs(Decimal(values["amount"]))
-        stable = self._stable(record, "ledger-acquisition", run.contract_version)
-        acquisition = AcquisitionLot(
-            stable_key=stable,
-            payload_hash=record.content_hash,
-            asset_raw_code=asset.raw_code,
-            asset_code=asset.canonical_code,
-            asset_mapping_version=asset.mapping_version,
-            quantity=amount,
-            occurred_at=_timestamp(values["time"]),
-            acquisition_type=event_kind,
-            provider=PROVIDER,
-            account_scope=ACCOUNT_SCOPE,
-            wallet_scope=WALLET_SCOPE,
-            external_id=record.external_id or str(record.id),
-            transformation_version=run.contract_version,
-            valuation_status=ValuationStatus.VALUATION_REQUIRED,
-            tax_treatment_hint=TaxTreatmentHint.TRADE_ACQUISITION,
-        )
-        if self._persist_projection(
-            unit, run, record, acquisition, "AcquisitionLot", counters, problems
+        occurred_at = _timestamp(receive_values["time"])
+        decided_records: set[UUID] = set()
+        acquisition: AcquisitionLot | None = None
+        if received not in FIAT_ASSETS:
+            direct_eur = spent == "EUR"
+            acquisition = AcquisitionLot(
+                stable_key=acquisition_stable,
+                payload_hash=payload_hash,
+                asset_raw_code=receive_asset.raw_code,
+                asset_code=received,
+                asset_mapping_version=receive_asset.mapping_version,
+                quantity=receive_amount,
+                occurred_at=occurred_at,
+                acquisition_type=(
+                    AcquisitionType.TRADE_BUY
+                    if spent in FIAT_ASSETS
+                    else AcquisitionType.CRYPTO_EXCHANGE
+                ),
+                provider=PROVIDER,
+                account_scope=ACCOUNT_SCOPE,
+                wallet_scope=WALLET_SCOPE,
+                external_id=reference,
+                transformation_version=run.contract_version,
+                valuation_status=(
+                    ValuationStatus.NATIVE_EUR_AVAILABLE
+                    if direct_eur
+                    else ValuationStatus.VALUATION_REQUIRED
+                ),
+                tax_treatment_hint=TaxTreatmentHint.TRADE_ACQUISITION,
+                native_consideration_asset=spent,
+                native_consideration_quantity=abs(spend_amount),
+            )
+            if self._persist_projection(
+                unit, run, receive, acquisition, "AcquisitionLot", counters, problems
+            ):
+                self._provenance(unit, run, spend, "AcquisitionLot", acquisition.id)
+                counters.acquisitions += 1
+                self._valuation(
+                    unit,
+                    run,
+                    acquisition,
+                    (
+                        "native_eur_instant_exchange_acquisition"
+                        if direct_eur
+                        else "instant_exchange_acquisition"
+                    ),
+                    counters,
+                    method=(
+                        ValuationMethod.DIRECT_EUR
+                        if direct_eur
+                        else ValuationMethod.DAILY_AVERAGE
+                    ),
+                )
+                self._audit(
+                    unit,
+                    run,
+                    "transformation.acquisition_created",
+                    {"acquisition_id": str(acquisition.id)},
+                )
+            decided_records.add(receive.id)
+
+        disposal: DisposalEvent | None = None
+        if spent not in FIAT_ASSETS:
+            direct_eur = received == "EUR"
+            disposal = DisposalEvent(
+                stable_key=disposal_stable,
+                payload_hash=payload_hash,
+                asset_raw_code=spend_asset.raw_code,
+                asset_code=spent,
+                asset_mapping_version=spend_asset.mapping_version,
+                quantity=abs(spend_amount),
+                occurred_at=occurred_at,
+                disposal_type=(
+                    DisposalType.TRADE_SELL
+                    if received in FIAT_ASSETS
+                    else DisposalType.CRYPTO_EXCHANGE
+                ),
+                provider=PROVIDER,
+                account_scope=ACCOUNT_SCOPE,
+                wallet_scope=WALLET_SCOPE,
+                external_id=reference,
+                transformation_version=run.contract_version,
+                valuation_status=(
+                    ValuationStatus.NATIVE_EUR_AVAILABLE
+                    if direct_eur
+                    else ValuationStatus.VALUATION_REQUIRED
+                ),
+                tax_treatment_hint=(
+                    TaxTreatmentHint.TRADE_DISPOSAL
+                    if received in FIAT_ASSETS
+                    else TaxTreatmentHint.CRYPTO_ASSET_EXCHANGE
+                ),
+                native_consideration_asset=received,
+                native_consideration_quantity=receive_amount,
+            )
+            if self._persist_projection(
+                unit, run, spend, disposal, "DisposalEvent", counters, problems
+            ):
+                self._provenance(unit, run, receive, "DisposalEvent", disposal.id)
+                counters.disposals += 1
+                self._valuation(
+                    unit,
+                    run,
+                    disposal,
+                    (
+                        "native_eur_instant_exchange_disposal"
+                        if direct_eur
+                        else "instant_exchange_disposal"
+                    ),
+                    counters,
+                    method=(
+                        ValuationMethod.DIRECT_EUR
+                        if direct_eur
+                        else ValuationMethod.DAILY_AVERAGE
+                    ),
+                )
+                self._audit(
+                    unit,
+                    run,
+                    "transformation.disposal_created",
+                    {"disposal_id": str(disposal.id)},
+                )
+            decided_records.add(spend.id)
+
+        spend_related = existing_disposal or disposal or acquisition
+        receive_related = existing_acquisition or acquisition or disposal
+        assert spend_related is not None and receive_related is not None
+        related_by_record = {
+            spend.id: spend_related.id,
+            receive.id: receive_related.id,
+        }
+        for fee_record, fee_values, fee_asset, fee in (
+            (spend, spend_values, spend_asset, spend_fee),
+            (receive, receive_values, receive_asset, receive_fee),
         ):
-            for related in group:
-                if related.id != record.id:
-                    self._provenance(
-                        unit, run, related, "AcquisitionLot", acquisition.id
-                    )
-            counters.acquisitions += 1
-            self._valuation(unit, run, acquisition, "instant_exchange", counters)
-            self._audit(
+            if fee <= 0:
+                continue
+            related_id = related_by_record[fee_record.id]
+            assert fee_asset.canonical_code is not None
+            fee_event = FeeEvent(
+                stable_key=self._stable(fee_record, "ledger-fee", run.contract_version),
+                payload_hash=payload_hash,
+                asset_code=fee_asset.canonical_code,
+                quantity=fee,
+                occurred_at=_timestamp(fee_values["time"]),
+                provider=PROVIDER,
+                external_id=fee_record.external_id or str(fee_record.id),
+                transformation_version=run.contract_version,
+                valuation_status=(
+                    ValuationStatus.NATIVE_EUR_AVAILABLE
+                    if fee_asset.canonical_code == "EUR"
+                    else ValuationStatus.VALUATION_REQUIRED
+                ),
+                related_object_id=related_id,
+            )
+            if self._persist_projection(
                 unit,
                 run,
-                "transformation.acquisition_created",
-                {"acquisition_id": str(acquisition.id)},
-            )
+                fee_record,
+                fee_event,
+                "FeeEvent",
+                counters,
+                problems,
+                create_decision=fee_record.id not in decided_records,
+            ):
+                other = receive if fee_record.id == spend.id else spend
+                self._provenance(unit, run, other, "FeeEvent", fee_event.id)
+                counters.fees += 1
+                self._valuation(
+                    unit,
+                    run,
+                    fee_event,
+                    (
+                        "native_eur_instant_exchange_fee"
+                        if fee_asset.canonical_code == "EUR"
+                        else "instant_exchange_fee"
+                    ),
+                    counters,
+                    method=(
+                        ValuationMethod.DIRECT_EUR
+                        if fee_asset.canonical_code == "EUR"
+                        else ValuationMethod.DAILY_AVERAGE
+                    ),
+                )
+                self._audit(
+                    unit,
+                    run,
+                    "transformation.fee_created",
+                    {"fee_id": str(fee_event.id)},
+                )
+            decided_records.add(fee_record.id)
+        for group_record in group:
+            if group_record.id not in decided_records:
+                self._decision(
+                    unit,
+                    run,
+                    group_record,
+                    DecisionType.DOMAIN_EVENT_CREATED,
+                    "ledger_exchange_group_linked",
+                    "Ledger record is linked to the grouped instant exchange.",
+                )
 
     def _transform_ledger(
         self,
@@ -788,31 +1038,38 @@ class KrakenTransformationService:
         unit: UnitOfWork,
         run: TransformationRun,
         record: RawImportRecord,
-        entity: AcquisitionLot | TradeExecution,
+        entity: AcquisitionLot | DisposalEvent | FeeEvent | TradeExecution,
         entity_type: str,
         counters: _Counters,
         problems: list[TransformationProblem],
+        *,
+        create_decision: bool = True,
     ) -> bool:
         unit.flush()
-        existing: AcquisitionLot | TradeExecution | None
+        existing: AcquisitionLot | DisposalEvent | FeeEvent | TradeExecution | None
         if isinstance(entity, AcquisitionLot):
             existing = unit.acquisitions.find_by_stable_key(entity.stable_key)
+        elif isinstance(entity, DisposalEvent):
+            existing = unit.disposals.find_by_stable_key(entity.stable_key)
+        elif isinstance(entity, FeeEvent):
+            existing = unit.fee_events.find_by_stable_key(entity.stable_key)
         else:
             existing = unit.trade_executions.find_by_stable_key(entity.stable_key)
         if existing is not None:
             if existing.payload_hash == entity.payload_hash:
-                self._decision(
-                    unit,
-                    run,
-                    record,
-                    DecisionType.DOMAIN_EVENT_REUSED,
-                    "domain_event_reused",
-                    (
-                        "The same external record already has an identical "
-                        "domain projection."
-                    ),
-                    existing.id,
-                )
+                if create_decision:
+                    self._decision(
+                        unit,
+                        run,
+                        record,
+                        DecisionType.DOMAIN_EVENT_REUSED,
+                        "domain_event_reused",
+                        (
+                            "The same external record already has an identical "
+                            "domain projection."
+                        ),
+                        existing.id,
+                    )
                 counters.reused += 1
                 self._audit(
                     unit,
@@ -833,18 +1090,23 @@ class KrakenTransformationService:
             return False
         if isinstance(entity, AcquisitionLot):
             unit.acquisitions.add(entity)
+        elif isinstance(entity, DisposalEvent):
+            unit.disposals.add(entity)
+        elif isinstance(entity, FeeEvent):
+            unit.fee_events.add(entity)
         else:
             unit.trade_executions.add(entity)
         self._provenance(unit, run, record, entity_type, entity.id)
-        self._decision(
-            unit,
-            run,
-            record,
-            DecisionType.DOMAIN_EVENT_CREATED,
-            f"{entity_type.lower()}_created",
-            f"A provider-neutral {entity_type} was created.",
-            entity.id,
-        )
+        if create_decision:
+            self._decision(
+                unit,
+                run,
+                record,
+                DecisionType.DOMAIN_EVENT_CREATED,
+                f"{entity_type.lower()}_created",
+                f"A provider-neutral {entity_type} was created.",
+                entity.id,
+            )
         return True
 
     def _review(

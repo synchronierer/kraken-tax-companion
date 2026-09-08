@@ -19,6 +19,7 @@ LEGACY_ASSET_ALIASES = {
 }
 ASSET_ALIASES = {
     **LEGACY_ASSET_ALIASES,
+    "ETH2": "ETH",
     "XLTC": "LTC",
     "XDG": "DOGE",
     "XXDG": "DOGE",

@@ -346,6 +346,23 @@ def test_pagination_deduplication_sorting_digest_and_unknown_values() -> None:
     assert result.stable_ledger_id_digest == reversed_result.stable_ledger_id_digest
 
 
+def test_spend_and_receive_are_known_ledger_types() -> None:
+    page = {
+        "error": [],
+        "result": {
+            "count": 2,
+            "ledger": {
+                "S": entry(entry_type="spend", amount="-1"),
+                "R": entry(entry_type="receive", asset="XETH", amount="2"),
+            },
+        },
+    }
+    result = preview(client_with_pages(page), limit=10)
+    assert result.unknown_types == ()
+    canonical = tuple(canonical_from_api(item) for item in result.records)
+    assert all(item.event_mapping_known for item in canonical)
+
+
 def test_incomplete_conflicting_and_malformed_pages_are_diagnostic() -> None:
     original = entry()
     changed = entry(amount="2")

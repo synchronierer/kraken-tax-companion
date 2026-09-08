@@ -29,18 +29,23 @@ from app.core.identifiers import new_id
 from app.core.tax import ExportRun, InventoryLot, TaxCalculationRun, TaxReviewDecision
 from app.core.transformation import (
     AcquisitionLot,
+    AcquisitionType,
     DecisionType,
     DisposalEvent,
+    DisposalType,
     DomainProvenance,
     FeeEvent,
     MappingStatus,
     ReconciliationStatus,
+    TaxTreatmentHint,
     TradeExecution,
     TransformationDecision,
     TransformationIssue,
     TransformationRun,
     TransformationStatus,
+    ValuationMethod,
     ValuationRequirement,
+    ValuationStatus,
     non_negative_decimal,
 )
 from app.core.valuation import ValuationDecision, ValuationRun
@@ -115,13 +120,14 @@ def ledger(
     fee: str = "0",
     subtype: str = "",
     refid: str = "",
+    occurred_at: str = "2026-03-06 12:00:00",
 ) -> tuple[str, str, dict[str, str]]:
     return (
         "kraken-ledgers",
         f"kraken:ledger:{txid}",
         {
             "txid": txid,
-            "time": "2026-03-06 12:00:00",
+            "time": occurred_at,
             "type": kind,
             "subtype": subtype,
             "asset": asset,
@@ -171,6 +177,8 @@ def trade(
         ("XXBT", "BTC"),
         ("ETH", "ETH"),
         ("XETH", "ETH"),
+        ("ETH2", "ETH"),
+        ("ETH2.S", "ETH"),
         ("EUR", "EUR"),
         ("ZEUR", "EUR"),
         ("XLTC", "LTC"),
@@ -204,6 +212,7 @@ def test_new_asset_is_identity_mapped_and_legacy_v1_remains_auditable() -> None:
     assert resolve_asset("ZGBP").canonical_code == "GBP"
     assert normalize_kraken_asset("XUNKNOWN").normalized_asset == "XUNKNOWN"
     assert normalize_kraken_asset("ZUNKNOWN").normalized_asset == "ZUNKNOWN"
+    assert normalize_kraken_asset("NEW2").normalized_asset == "NEW2"
 
 
 @pytest.mark.parametrize(
@@ -419,6 +428,235 @@ def test_ledger_only_grouping_and_missing_reference() -> None:
             database.scalar(select(func.count()).select_from(TransformationDecision))
             == 3
         )
+
+
+def test_historical_btc_eur_instant_exchange_projects_disposal_and_fee() -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [
+            ledger(
+                "SPEND-BTC",
+                "spend",
+                "-0.1340000000",
+                asset="XXBT",
+                refid="TSVK3PQ-R257N-25Q4AI",
+                occurred_at="2022-01-13 12:00:00",
+            ),
+            ledger(
+                "RECEIVE-EUR",
+                "receive",
+                "5133.9400",
+                asset="ZEUR",
+                fee="75.8800",
+                refid="TSVK3PQ-R257N-25Q4AI",
+                occurred_at="2022-01-13 12:00:00",
+            ),
+        ],
+    )
+
+    first = transform(factory, session_id, version="kraken-domain-v2")
+    repeated = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert first.disposals == first.fee_events == 1
+    assert first.acquisitions == 0
+    assert first.valuation_requirements == 2
+    assert repeated.disposals == repeated.fee_events == 0
+    assert repeated.reused_objects == 2
+    with factory() as database:
+        disposal = database.scalar(select(DisposalEvent))
+        fee = database.scalar(select(FeeEvent))
+        assert disposal is not None and fee is not None
+        assert disposal.asset_code == "BTC"
+        assert disposal.quantity == Decimal("0.1340000000")
+        assert disposal.disposal_type is DisposalType.TRADE_SELL
+        assert disposal.tax_treatment_hint is TaxTreatmentHint.TRADE_DISPOSAL
+        assert disposal.native_consideration_asset == "EUR"
+        assert disposal.native_consideration_quantity == Decimal("5133.9400")
+        assert disposal.valuation_status is ValuationStatus.NATIVE_EUR_AVAILABLE
+        assert fee.asset_code == "EUR"
+        assert fee.quantity == Decimal("75.8800")
+        assert fee.valuation_status is ValuationStatus.NATIVE_EUR_AVAILABLE
+        assert fee.related_object_id == disposal.id
+        assert database.scalar(select(func.count()).select_from(AcquisitionLot)) == 0
+        requirements = tuple(database.scalars(select(ValuationRequirement)))
+        assert {item.domain_object_type for item in requirements} == {
+            "DisposalEvent",
+            "FeeEvent",
+        }
+        assert all(item.method is ValuationMethod.DIRECT_EUR for item in requirements)
+        provenance = tuple(database.scalars(select(DomainProvenance)))
+        assert len(provenance) == 4
+        assert all(
+            len(
+                {
+                    item.raw_import_record_id
+                    for item in provenance
+                    if item.domain_object_id == domain_id
+                }
+            )
+            == 2
+            for domain_id in {disposal.id, fee.id}
+        )
+
+
+def test_fiat_crypto_instant_exchange_creates_only_crypto_acquisition() -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [
+            ledger(
+                "SPEND-EUR",
+                "spend",
+                "-40000",
+                asset="ZEUR",
+                fee="2",
+                refid="EUR-BTC",
+            ),
+            ledger(
+                "RECEIVE-BTC",
+                "receive",
+                "1",
+                asset="XXBT",
+                fee="0.001",
+                refid="EUR-BTC",
+            ),
+        ],
+    )
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.acquisitions == 1
+    assert result.disposals == 0
+    assert result.fee_events == 2
+    with factory() as database:
+        acquisition = database.scalar(select(AcquisitionLot))
+        assert acquisition is not None
+        assert acquisition.asset_code == "BTC"
+        assert acquisition.acquisition_type is AcquisitionType.TRADE_BUY
+        assert acquisition.native_consideration_asset == "EUR"
+        assert acquisition.native_consideration_quantity == Decimal("40000")
+        assert acquisition.valuation_status is ValuationStatus.NATIVE_EUR_AVAILABLE
+        assert database.scalar(select(func.count()).select_from(DisposalEvent)) == 0
+        fees = tuple(database.scalars(select(FeeEvent)))
+        assert {(item.asset_code, item.quantity) for item in fees} == {
+            ("EUR", Decimal("2")),
+            ("BTC", Decimal("0.001")),
+        }
+        requirements = tuple(database.scalars(select(ValuationRequirement)))
+        direct = {
+            item.domain_object_type
+            for item in requirements
+            if item.method is ValuationMethod.DIRECT_EUR
+        }
+        assert direct == {"AcquisitionLot", "FeeEvent"}
+
+
+def test_crypto_crypto_instant_exchange_projects_both_sides_without_eur() -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [
+            ledger("SPEND-BTC", "spend", "-0.5", refid="BTC-ETH"),
+            ledger(
+                "RECEIVE-ETH",
+                "receive",
+                "8",
+                asset="XETH",
+                refid="BTC-ETH",
+            ),
+        ],
+    )
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.acquisitions == result.disposals == 1
+    with factory() as database:
+        acquisition = database.scalar(select(AcquisitionLot))
+        disposal = database.scalar(select(DisposalEvent))
+        assert acquisition is not None and disposal is not None
+        assert acquisition.asset_code == "ETH"
+        assert acquisition.quantity == Decimal("8")
+        assert acquisition.acquisition_type is AcquisitionType.CRYPTO_EXCHANGE
+        assert acquisition.native_consideration_asset == "BTC"
+        assert acquisition.native_consideration_quantity == Decimal("0.5")
+        assert acquisition.valuation_status is ValuationStatus.VALUATION_REQUIRED
+        assert disposal.asset_code == "BTC"
+        assert disposal.quantity == Decimal("0.5")
+        assert disposal.disposal_type is DisposalType.CRYPTO_EXCHANGE
+        assert disposal.native_consideration_asset == "ETH"
+        assert disposal.native_consideration_quantity == Decimal("8")
+        assert disposal.valuation_status is ValuationStatus.VALUATION_REQUIRED
+        assert all(
+            item.method is ValuationMethod.DAILY_AVERAGE
+            for item in database.scalars(select(ValuationRequirement))
+        )
+
+
+def test_changed_instant_exchange_payload_conflicts_without_duplicate_objects() -> None:
+    factory = database_factory()
+    original = store_records(
+        factory,
+        [
+            ledger("SAME-S", "spend", "-100", asset="ZEUR", refid="SAME-REF"),
+            ledger("SAME-R", "receive", "1", refid="SAME-REF"),
+        ],
+    )
+    changed = store_records(
+        factory,
+        [
+            ledger("SAME-S", "spend", "-100", asset="ZEUR", refid="SAME-REF"),
+            ledger("SAME-R", "receive", "2", refid="SAME-REF"),
+        ],
+    )
+    first = transform(factory, original, version="kraken-domain-v2")
+    conflict = transform(factory, changed, version="kraken-domain-v2")
+    assert first.acquisitions == 1
+    assert conflict.conflicts == conflict.review_cases == 1
+    assert conflict.acquisitions == 0
+    with factory() as database:
+        assert database.scalar(select(func.count()).select_from(AcquisitionLot)) == 1
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [
+            ledger("S", "spend", "1", asset="ZEUR", refid="BAD-SIGN"),
+            ledger("R", "receive", "1", refid="BAD-SIGN"),
+        ],
+        [
+            ledger("S", "spend", "-1", asset="ZEUR", refid="BAD-ASSET"),
+            ledger("R", "receive", "1", asset="?", refid="BAD-ASSET"),
+        ],
+        [
+            ledger("S", "spend", "-1", asset="ZEUR", refid="BAD-FEE"),
+            ledger("R", "receive", "1", fee="-1", refid="BAD-FEE"),
+        ],
+        [
+            ledger("S", "spend", "invalid", asset="ZEUR", refid="BAD-AMOUNT"),
+            ledger("R", "receive", "1", refid="BAD-AMOUNT"),
+        ],
+        [
+            ledger("S", "spend", "-1", asset="ZEUR", refid="FIAT-FIAT"),
+            ledger("R", "receive", "1", asset="ZUSD", refid="FIAT-FIAT"),
+        ],
+    ],
+)
+def test_invalid_instant_exchange_groups_require_review_without_projection(
+    records: list[tuple[str, str, dict[str, str]]],
+) -> None:
+    factory = database_factory()
+    result = transform(
+        factory, store_records(factory, records), version="kraken-domain-v2"
+    )
+    assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
+    assert result.review_cases == 1
+    assert result.acquisitions == result.disposals == result.fee_events == 0
+    with factory() as database:
+        assert database.scalar(select(func.count()).select_from(AcquisitionLot)) == 0
+        assert database.scalar(select(func.count()).select_from(DisposalEvent)) == 0
+        assert database.scalar(select(func.count()).select_from(FeeEvent)) == 0
 
 
 def test_trade_ledger_asset_conflict_is_not_projected() -> None:

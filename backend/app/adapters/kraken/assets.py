@@ -19,6 +19,9 @@ LEGACY_ASSET_ALIASES = {
 }
 ASSET_ALIASES = {
     **LEGACY_ASSET_ALIASES,
+    "XLTC": "LTC",
+    "XDG": "DOGE",
+    "XXDG": "DOGE",
     "ZGBP": "GBP",
     "ZCAD": "CAD",
     "ZJPY": "JPY",

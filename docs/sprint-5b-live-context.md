@@ -39,8 +39,11 @@ The context compares current stateless FIFO inventory with the Kraken total
 balance as `MATCH`, `DIFFERENCE`, or `UNKNOWN`. A difference is informational;
 it creates no lot, disposal, correction, or other persistence.
 
-A live simulation requires both a readable balance and a direct EUR quote. Its
-maximum quantity is the lower of documented FIFO inventory and available spot
-balance. Non-spot extensions cannot increase this maximum. All responses remain
-dry runs: no order, exchange mutation, tax run, review decision, or tax artifact
-is created.
+A live simulation requires a readable balance, a direct EUR quote, and a
+`MATCH` between documented FIFO inventory and the Kraken total balance. A
+`DIFFERENCE` remains visible in live context but blocks live simulation with
+`EXCHANGE_INVENTORY_NOT_RECONCILED`. Its maximum quantity is the lower of
+documented FIFO inventory and available spot balance. Non-spot extensions count
+toward the held total for reconciliation but cannot increase this sale capacity.
+All responses remain dry runs: no order, exchange mutation, tax run, review
+decision, or tax artifact is created.

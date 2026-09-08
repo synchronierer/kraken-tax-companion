@@ -1367,7 +1367,7 @@ def test_live_simulation_modes_use_bid_and_safe_exchange_max_without_persistence
     before = _counts(sessions)
     _install_live_fakes(
         monkeypatch,
-        balance=_BalanceClient(_snapshot(spot_balance="3", non_spot_balance="1")),
+        balance=_BalanceClient(_snapshot(spot_balance="3", non_spot_balance="428")),
     )
     response = client.post("/api/sale-proposals/simulate-live", json=payload)
     assert response.status_code == 200
@@ -1391,13 +1391,26 @@ def test_live_simulation_modes_use_bid_and_safe_exchange_max_without_persistence
     ("balance", "payload", "status", "code"),
     [
         (
-            _BalanceClient(_snapshot(spot_balance="1", non_spot_balance="0")),
+            _BalanceClient(_snapshot(spot_balance="1", non_spot_balance="430")),
             {"asset": "ETH", "mode": "quantity", "quantity": "2"},
             409,
             "INSUFFICIENT_EXCHANGE_AVAILABLE_BALANCE",
         ),
         (
-            _BalanceClient(_snapshot(spot_balance="500", non_spot_balance="0")),
+            _BalanceClient(
+                ExchangeBalanceSnapshot(
+                    fetched_at=NOW,
+                    balances=(
+                        _extended_balance(
+                            provider_code="XETH",
+                            asset="ETH",
+                            balance="431",
+                            available="500",
+                        ),
+                    ),
+                    warnings=(),
+                )
+            ),
             {"asset": "ETH", "mode": "quantity", "quantity": "432"},
             409,
             "INSUFFICIENT_FIFO_INVENTORY",
@@ -1422,6 +1435,30 @@ def test_live_simulation_blocks_unsafe_quantities_and_missing_balance(
     response = sale_api[0].post("/api/sale-proposals/simulate-live", json=payload)
     assert response.status_code == status
     assert response.json()["detail"]["code"] == code
+
+
+def test_live_simulation_requires_matched_total_inventory_without_persistence(
+    sale_api: tuple[TestClient, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, sessions = sale_api
+    before = _counts(sessions)
+    _install_live_fakes(
+        monkeypatch,
+        balance=_BalanceClient(_snapshot(spot_balance="429", non_spot_balance="1")),
+    )
+
+    context = client.get("/api/sale-proposals/live-context?asset=ETH")
+    simulation = client.post(
+        "/api/sale-proposals/simulate-live",
+        json={"asset": "ETH", "mode": "quantity", "quantity": "1"},
+    )
+
+    assert context.status_code == 200
+    assert context.json()["reconciliation_status"] == "DIFFERENCE"
+    assert simulation.status_code == 409
+    assert simulation.json()["detail"]["code"] == ("EXCHANGE_INVENTORY_NOT_RECONCILED")
+    assert _counts(sessions) == before
 
 
 def test_live_simulation_blocks_missing_price_and_financial_mapping(
@@ -1471,7 +1508,7 @@ def test_live_simulation_request_shape_and_zero_exchange_are_conservative(
 ) -> None:
     _install_live_fakes(
         monkeypatch,
-        balance=_BalanceClient(_snapshot(spot_balance="0", non_spot_balance="1")),
+        balance=_BalanceClient(_snapshot(spot_balance="0", non_spot_balance="431")),
     )
     zero = sale_api[0].post(
         "/api/sale-proposals/simulate-live",

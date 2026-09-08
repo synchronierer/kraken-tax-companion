@@ -66,6 +66,8 @@ def test_balance_ex_parses_exact_available_and_asset_kinds() -> None:
                 "ETH.F": {"balance": "-0.1", "credit": "0.1"},
                 "ADA.S": {"balance": "0"},
                 "DOT.M": {"balance": "1"},
+                "XLTC": {"balance": "1.4889563500"},
+                "XXDG": {"balance": "0.00296573"},
                 "?": {"balance": "1"},
             },
         }
@@ -76,6 +78,18 @@ def test_balance_ex_parses_exact_available_and_asset_kinds() -> None:
     assert btc.calculated_available == Decimal("2.0000000000000000001")
     assert btc.balance_kind == "spot"
     assert btc.provider_metadata == {"note": "provider detail"}
+    assert (
+        next(
+            item for item in snapshot.balances if item.provider_asset_code == "XLTC"
+        ).canonical_asset
+        == "LTC"
+    )
+    assert (
+        next(
+            item for item in snapshot.balances if item.provider_asset_code == "XXDG"
+        ).canonical_asset
+        == "DOGE"
+    )
     extensions = {
         item.provider_asset_code: item.extension
         for item in snapshot.balances

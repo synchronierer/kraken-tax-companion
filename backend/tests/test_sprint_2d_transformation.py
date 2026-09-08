@@ -173,6 +173,9 @@ def trade(
         ("XETH", "ETH"),
         ("EUR", "EUR"),
         ("ZEUR", "EUR"),
+        ("XLTC", "LTC"),
+        ("XXDG", "DOGE"),
+        ("XDG", "DOGE"),
         ("USD", "USD"),
         ("ZUSD", "USD"),
     ],
@@ -200,6 +203,7 @@ def test_new_asset_is_identity_mapped_and_legacy_v1_remains_auditable() -> None:
     assert resolve_asset_legacy_v1("ZGBP").canonical_code is None
     assert resolve_asset("ZGBP").canonical_code == "GBP"
     assert normalize_kraken_asset("XUNKNOWN").normalized_asset == "XUNKNOWN"
+    assert normalize_kraken_asset("ZUNKNOWN").normalized_asset == "ZUNKNOWN"
 
 
 @pytest.mark.parametrize(

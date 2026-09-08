@@ -522,6 +522,12 @@ def simulate_live(
             "EXCHANGE_BALANCE_UNAVAILABLE",
             "Der verfügbare Kraken-Spot-Bestand konnte nicht gelesen werden.",
         )
+    if context["reconciliation_status"] != "MATCH":
+        raise _error(
+            409,
+            "EXCHANGE_INVENTORY_NOT_RECONCILED",
+            "Steuerbestand und Kraken-Gesamtbestand stimmen nicht überein.",
+        )
     if not context["price_available"]:
         code = (
             "KRAKEN_EUR_PAIR_UNAVAILABLE"

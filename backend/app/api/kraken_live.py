@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.adapters.kraken.ledger import (
     LEDGER_ASSET_MAPPING_VERSION,
     LEDGER_NORMALIZATION_VERSION,
+    CanonicalKrakenLedgerRecord,
     ParsedLedgerBatch,
     canonical_fingerprint,
     canonical_from_api,
@@ -16,6 +18,10 @@ from app.adapters.kraken.ledger import (
     filter_records,
     ledger_digest,
     parse_ledger_csv,
+)
+from app.adapters.kraken.trade_reconciliation import (
+    TradeLedgerReconciliationStatus,
+    reconcile_trade_ledgers,
 )
 from app.adapters.kraken.transformation import (
     TRANSFORMATION_CONTRACT_VERSION,
@@ -89,6 +95,60 @@ class LedgerPreviewResponse(BaseModel):
     warnings: list[str]
     ready_for_import: bool
     diagnostics: list[DiagnosticEntryResponse]
+
+
+class TradePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: datetime | None = None
+    end: datetime | None = None
+    diagnostic_limit: int = Field(default=0, ge=0, le=100)
+
+
+class TradeDiagnosticResponse(BaseModel):
+    trade_id: str
+    ordertxid: str
+    postxid: str | None
+    pair: str
+    occurred_at: datetime
+    side: str
+    ordertype: str
+    price: Decimal
+    cost: Decimal
+    fee: Decimal
+    volume: Decimal
+    margin: Decimal
+    leverage: str
+    misc: str
+    ledger_ids: list[str]
+    provider_metadata: dict[str, Any]
+    transformation_payload: dict[str, str]
+    reconciliation_status: str
+    matched_ledger_ids: list[str]
+    missing_ledger_ids: list[str]
+
+
+class TradePreviewResponse(BaseModel):
+    connection_status: str
+    requested_start: datetime | None
+    requested_end: datetime | None
+    fetched_pages: int
+    reported_total: int
+    received_total: int
+    unique_total: int
+    duplicate_ids: list[str]
+    conflicting_duplicate_ids: list[str]
+    earliest_trade_at: datetime | None
+    latest_trade_at: datetime | None
+    counts_by_pair: dict[str, int]
+    counts_by_side: dict[str, int]
+    malformed_entries: int
+    pagination_complete: bool
+    stable_trade_id_digest: str
+    reconciliation_counts: dict[str, int]
+    warnings: list[str]
+    ready_for_import: bool
+    diagnostics: list[TradeDiagnosticResponse]
 
 
 class LedgerImportRequest(BaseModel):
@@ -177,6 +237,7 @@ _STATUS_BY_CODE = {
     "kraken_base_url_invalid": 503,
     "kraken_authentication_failed": 401,
     "kraken_ledger_permission_missing": 403,
+    "kraken_trade_history_permission_missing": 403,
     "kraken_invalid_nonce": 502,
     "kraken_rate_limited": 429,
     "kraken_timeout": 504,
@@ -306,6 +367,131 @@ def ledger_preview(
             },
         )
     return _preview_response(preview)
+
+
+@router.post("/trade-preview", response_model=TradePreviewResponse)
+def trade_preview(
+    request: Annotated[TradePreviewRequest, Body()],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> TradePreviewResponse:
+    invalid_timezone = any(
+        value is not None and (value.tzinfo is None or value.utcoffset() is None)
+        for value in (request.start, request.end)
+    )
+    if invalid_timezone:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "kraken_invalid_filter",
+                "message": "Die Trade-History-Filter sind ungültig.",
+            },
+        )
+    if request.start and request.end and request.end <= request.start:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "kraken_invalid_period",
+                "message": "Das Ende muss nach dem Beginn liegen.",
+            },
+        )
+    try:
+        client = build_kraken_client(settings)
+        preview = client.trade_history_preview(
+            start=request.start,
+            end=request.end,
+            diagnostic_limit=request.diagnostic_limit,
+        )
+    except KrakenPrivateError as error:
+        raise _http_error(error) from error
+    warnings = list(preview.warnings)
+    ledger_ready = False
+    canonical_ledgers: tuple[CanonicalKrakenLedgerRecord, ...] = ()
+    try:
+        ledger = client.ledger_preview(
+            start=request.start,
+            end=request.end,
+            asset=None,
+            ledger_type="trade",
+            diagnostic_limit=0,
+        )
+        canonical_ledgers = tuple(canonical_from_api(item) for item in ledger.records)
+        ledger_ready = ledger.ready_for_import
+        warnings.extend(ledger.warnings)
+        if not ledger_ready:
+            warnings.append("KRAKEN_LEDGER_RECONCILIATION_INCOMPLETE")
+    except KrakenPrivateError as error:
+        warnings.append(f"KRAKEN_LEDGER_RECONCILIATION_UNAVAILABLE:{error.code}")
+    reconciliations = {
+        item.trade_id: reconcile_trade_ledgers(item, canonical_ledgers)
+        for item in preview.records
+    }
+    reconciliation_counts: dict[str, int] = {}
+    for reconciliation in reconciliations.values():
+        reconciliation_counts[reconciliation.status.value] = (
+            reconciliation_counts.get(reconciliation.status.value, 0) + 1
+        )
+    if any(
+        reconciliation.status is not TradeLedgerReconciliationStatus.MATCHED
+        for reconciliation in reconciliations.values()
+    ):
+        warnings.append("KRAKEN_TRADE_LEDGER_RECONCILIATION_INCOMPLETE")
+    ready = (
+        preview.ready_for_import
+        and ledger_ready
+        and all(
+            reconciliation.status is TradeLedgerReconciliationStatus.MATCHED
+            for reconciliation in reconciliations.values()
+        )
+    )
+    diagnostics = []
+    for item in preview.records[: request.diagnostic_limit]:
+        reconciliation = reconciliations[item.trade_id]
+        diagnostics.append(
+            TradeDiagnosticResponse(
+                trade_id=item.trade_id,
+                ordertxid=item.order_txid,
+                postxid=item.position_txid,
+                pair=item.pair,
+                occurred_at=item.occurred_at,
+                side=item.side,
+                ordertype=item.order_type,
+                price=item.price,
+                cost=item.cost,
+                fee=item.fee,
+                volume=item.volume,
+                margin=item.margin,
+                leverage=item.leverage,
+                misc=item.misc,
+                ledger_ids=list(item.ledger_ids),
+                provider_metadata=dict(item.provider_metadata),
+                transformation_payload=item.transformation_payload(),
+                reconciliation_status=reconciliation.status.value,
+                matched_ledger_ids=list(reconciliation.matched_ledger_ids),
+                missing_ledger_ids=list(reconciliation.missing_ledger_ids),
+            )
+        )
+    return TradePreviewResponse(
+        connection_status="CONNECTED_READ_ONLY",
+        requested_start=preview.requested_start,
+        requested_end=preview.requested_end,
+        fetched_pages=preview.fetched_pages,
+        reported_total=preview.reported_total,
+        received_total=preview.received_total,
+        unique_total=preview.unique_total,
+        duplicate_ids=list(preview.duplicate_ids),
+        conflicting_duplicate_ids=list(preview.conflicting_duplicate_ids),
+        earliest_trade_at=preview.earliest_trade_at,
+        latest_trade_at=preview.latest_trade_at,
+        counts_by_pair=dict(preview.counts_by_pair),
+        counts_by_side=dict(preview.counts_by_side),
+        malformed_entries=preview.malformed_entries,
+        pagination_complete=preview.pagination_complete,
+        stable_trade_id_digest=preview.stable_trade_id_digest,
+        reconciliation_counts=reconciliation_counts,
+        warnings=list(dict.fromkeys(warnings)),
+        ready_for_import=ready,
+        diagnostics=diagnostics,
+    )
 
 
 @router.post("/ledger-compare", response_model=LedgerComparisonResponse)

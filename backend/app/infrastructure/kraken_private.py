@@ -132,6 +132,72 @@ class LedgerPreview:
     records: tuple[LedgerEntry, ...]
 
 
+@dataclass(frozen=True)
+class TradeHistoryEntry:
+    trade_id: str
+    order_txid: str
+    position_txid: str | None
+    pair: str
+    occurred_at: datetime
+    side: str
+    order_type: str
+    price: Decimal
+    cost: Decimal
+    fee: Decimal
+    volume: Decimal
+    margin: Decimal
+    leverage: str
+    misc: str
+    ledger_ids: tuple[str, ...]
+    provider_metadata: Mapping[str, object]
+
+    def transformation_payload(self) -> dict[str, str]:
+        return {
+            "txid": self.trade_id,
+            "ordertxid": self.order_txid,
+            "pair": self.pair,
+            "time": self.occurred_at.isoformat(),
+            "type": self.side,
+            "ordertype": self.order_type,
+            "price": str(self.price),
+            "cost": str(self.cost),
+            "fee": str(self.fee),
+            "vol": str(self.volume),
+            "ledgers": ",".join(self.ledger_ids),
+        }
+
+
+@dataclass(frozen=True)
+class TradeHistoryDiagnosticEntry:
+    trade_id: str
+    occurred_at: datetime
+    pair: str
+    side: str
+
+
+@dataclass(frozen=True)
+class TradeHistoryPreview:
+    requested_start: datetime | None
+    requested_end: datetime | None
+    fetched_pages: int
+    reported_total: int
+    received_total: int
+    unique_total: int
+    duplicate_ids: tuple[str, ...]
+    conflicting_duplicate_ids: tuple[str, ...]
+    earliest_trade_at: datetime | None
+    latest_trade_at: datetime | None
+    counts_by_pair: Mapping[str, int]
+    counts_by_side: Mapping[str, int]
+    malformed_entries: int
+    pagination_complete: bool
+    stable_trade_id_digest: str
+    warnings: tuple[str, ...]
+    ready_for_import: bool
+    diagnostics: tuple[TradeHistoryDiagnosticEntry, ...]
+    records: tuple[TradeHistoryEntry, ...]
+
+
 @dataclass(frozen=True, kw_only=True)
 class KrakenExtendedBalance:
     provider_asset_code: str
@@ -185,6 +251,7 @@ _KNOWN_SUBTYPES = {
 class KrakenPrivateClient:
     ledger_path = "/0/private/Ledgers"
     balance_path = "/0/private/BalanceEx"
+    trades_history_path = "/0/private/TradesHistory"
 
     def __init__(
         self,
@@ -244,7 +311,7 @@ class KrakenPrivateClient:
     ) -> Mapping[str, object]:
         attempt = 0
         while True:
-            if path == self.ledger_path:
+            if path in {self.ledger_path, self.trades_history_path}:
                 if self._last_ledger_start is not None:
                     remaining = self._ledger_interval - (
                         self._clock() - self._last_ledger_start
@@ -381,6 +448,11 @@ class KrakenPrivateClient:
                     "kraken_balance_permission_missing",
                     "Dem Kraken-Schlüssel fehlt die Funds-Query-Berechtigung.",
                 )
+            elif path == KrakenPrivateClient.trades_history_path:
+                code, message = (
+                    "kraken_trade_history_permission_missing",
+                    "Dem Kraken-Schlüssel fehlt die Trade-History-Leseberechtigung.",
+                )
             else:
                 code, message = (
                     "kraken_ledger_permission_missing",
@@ -394,13 +466,15 @@ class KrakenPrivateClient:
                 "Kraken begrenzt derzeit die Anfragerate.",
             )
         else:
+            if path == KrakenPrivateClient.trades_history_path:
+                request_name = "TradesHistory"
+            elif path == KrakenPrivateClient.balance_path:
+                request_name = "BalanceEx"
+            else:
+                request_name = "Ledger"
             code, message = (
                 "kraken_api_error",
-                (
-                    "Kraken konnte die BalanceEx-Anfrage nicht verarbeiten."
-                    if path == KrakenPrivateClient.balance_path
-                    else "Kraken konnte die Ledger-Anfrage nicht verarbeiten."
-                ),
+                f"Kraken konnte die {request_name}-Anfrage nicht verarbeiten.",
             )
         raise KrakenPrivateError(code, message, temporary=code == "kraken_rate_limited")
 
@@ -463,6 +537,254 @@ class KrakenPrivateClient:
             fetched_at=datetime.now(UTC),
             balances=tuple(sorted(balances, key=lambda item: item.provider_asset_code)),
             warnings=tuple(sorted(warnings)),
+        )
+
+    def trade_history_preview(
+        self,
+        *,
+        start: datetime | None,
+        end: datetime | None,
+        diagnostic_limit: int,
+        include_ledgers: bool = True,
+    ) -> TradeHistoryPreview:
+        if start and (start.tzinfo is None or start.utcoffset() is None):
+            raise ValueError("start must be timezone-aware")
+        if end and (end.tzinfo is None or end.utcoffset() is None):
+            raise ValueError("end must be timezone-aware")
+        if start and end and end <= start:
+            raise ValueError("end must be after start")
+        if diagnostic_limit < 0 or diagnostic_limit > 100:
+            raise ValueError("diagnostic_limit must be between 0 and 100")
+        fields = {
+            "type": "all",
+            "trades": "false",
+            "ofs": "0",
+        }
+        if include_ledgers:
+            fields["ledgers"] = "true"
+        if start:
+            fields["start"] = str(self._unix_seconds(start) - 1)
+        if end:
+            fields["end"] = str(self._unix_seconds(end) + (1 if end.microsecond else 0))
+        offset = 0
+        pages = 0
+        reported_total = 0
+        reported_counts: set[int] = set()
+        received_total = 0
+        malformed = 0
+        entries: dict[str, TradeHistoryEntry] = {}
+        duplicates: set[str] = set()
+        conflicts: set[str] = set()
+        complete = False
+        warnings: list[str] = []
+        while pages < self.max_pages:
+            fields["ofs"] = str(offset)
+            result = self._private_post(self.trades_history_path, fields)
+            count = result.get("count")
+            trades = result.get("trades")
+            numeric_count = (
+                Decimal(count)
+                if isinstance(count, (int, Decimal)) and not isinstance(count, bool)
+                else None
+            )
+            if (
+                numeric_count is None
+                or not numeric_count.is_finite()
+                or numeric_count != numeric_count.to_integral_value()
+                or numeric_count < 0
+                or not isinstance(trades, dict)
+            ):
+                raise KrakenPrivateError(
+                    "kraken_invalid_response",
+                    "Kraken lieferte ungültige TradesHistory-Daten.",
+                )
+            reported_total = int(numeric_count)
+            reported_counts.add(reported_total)
+            pages += 1
+            page_size = len(trades)
+            received_total += page_size
+            unique_before_page = len(entries)
+            for trade_id, raw_trade in trades.items():
+                if (
+                    not isinstance(trade_id, str)
+                    or not trade_id
+                    or not isinstance(raw_trade, dict)
+                ):
+                    malformed += 1
+                    continue
+                try:
+                    trade = self._parse_trade(trade_id, raw_trade)
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    InvalidOperation,
+                    OverflowError,
+                ):
+                    malformed += 1
+                    continue
+                previous = entries.get(trade_id)
+                if previous is not None:
+                    duplicates.add(trade_id)
+                    if previous != trade:
+                        conflicts.add(trade_id)
+                else:
+                    entries[trade_id] = trade
+            if offset + page_size >= reported_total:
+                complete = True
+                break
+            if page_size == 0:
+                warnings.append("Die Trade-Pagination meldete keinen Fortschritt.")
+                break
+            if len(entries) == unique_before_page:
+                warnings.append(
+                    "Die Trade-Pagination meldete keinen eindeutigen Fortschritt."
+                )
+                break
+            offset += page_size
+        if not complete and pages >= self.max_pages:
+            warnings.append(
+                "Die Sicherheitsgrenze der Trade-Pagination wurde erreicht."
+            )
+        if len(reported_counts) > 1:
+            warnings.append(
+                "Die gemeldete Trade-Gesamtzahl änderte sich während der Pagination."
+            )
+        ordered_all = sorted(
+            entries.values(), key=lambda item: (item.occurred_at, item.trade_id)
+        )
+        ordered = [
+            item
+            for item in ordered_all
+            if (start is None or start <= item.occurred_at)
+            and (end is None or item.occurred_at < end)
+        ]
+        filtered_ids = {item.trade_id for item in ordered}
+        duplicates.intersection_update(filtered_ids)
+        conflicts.intersection_update(filtered_ids)
+        provider_count_matches = reported_total == len(entries)
+        if not provider_count_matches:
+            warnings.append(
+                "Gemeldete Gesamtzahl und eindeutige TradesHistory-Datensätze "
+                "weichen ab."
+            )
+        digest = hashlib.sha256(
+            "\n".join(sorted(item.trade_id for item in ordered)).encode("utf-8")
+        ).hexdigest()
+        counts_pair = self._counts(item.pair for item in ordered)
+        counts_side = self._counts(item.side for item in ordered)
+        ready = complete and not conflicts and malformed == 0 and provider_count_matches
+        return TradeHistoryPreview(
+            requested_start=start.astimezone(UTC) if start else None,
+            requested_end=end.astimezone(UTC) if end else None,
+            fetched_pages=pages,
+            reported_total=reported_total,
+            received_total=received_total,
+            unique_total=len(ordered),
+            duplicate_ids=tuple(sorted(duplicates)),
+            conflicting_duplicate_ids=tuple(sorted(conflicts)),
+            earliest_trade_at=ordered[0].occurred_at if ordered else None,
+            latest_trade_at=ordered[-1].occurred_at if ordered else None,
+            counts_by_pair=counts_pair,
+            counts_by_side=counts_side,
+            malformed_entries=malformed,
+            pagination_complete=complete,
+            stable_trade_id_digest=digest,
+            warnings=tuple(warnings),
+            ready_for_import=ready,
+            diagnostics=tuple(
+                TradeHistoryDiagnosticEntry(
+                    item.trade_id,
+                    item.occurred_at,
+                    item.pair,
+                    item.side,
+                )
+                for item in ordered[:diagnostic_limit]
+            ),
+            records=tuple(ordered),
+        )
+
+    @staticmethod
+    def _parse_trade(trade_id: str, raw: Mapping[object, object]) -> TradeHistoryEntry:
+        timestamp = Decimal(str(raw["time"]))
+        decimals = {
+            name: Decimal(str(raw[name]))
+            for name in ("price", "cost", "fee", "vol", "margin")
+        }
+        if not timestamp.is_finite() or not all(
+            value.is_finite() for value in decimals.values()
+        ):
+            raise ValueError("Trade timestamp and decimals must be finite")
+        seconds = int(timestamp)
+        microseconds = int((timestamp - seconds) * Decimal("1000000"))
+        occurred_at = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(
+            seconds=seconds, microseconds=microseconds
+        )
+        strings: dict[str, str] = {}
+        for name in ("ordertxid", "pair", "type", "ordertype"):
+            value = raw[name]
+            if not isinstance(value, str) or not value:
+                raise TypeError("Trade identity fields must be non-empty strings")
+            strings[name] = value
+        if strings["type"] not in {"buy", "sell"}:
+            raise ValueError("Trade side must be buy or sell")
+        ledger_value = raw.get("ledgers", [])
+        if isinstance(ledger_value, str):
+            ledger_ids = tuple(
+                item.strip() for item in ledger_value.split(",") if item.strip()
+            )
+        elif isinstance(ledger_value, list) and all(
+            isinstance(item, str) and bool(item.strip()) for item in ledger_value
+        ):
+            ledger_ids = tuple(item.strip() for item in ledger_value)
+        else:
+            raise TypeError("Trade ledger IDs must be strings")
+        position_value = raw.get("postxid")
+        if position_value in {None, ""}:
+            position_txid = None
+        elif isinstance(position_value, str):
+            position_txid = position_value
+        else:
+            raise TypeError("Trade position ID must be a string")
+        leverage = raw.get("leverage", "")
+        misc = raw.get("misc", "")
+        if not isinstance(leverage, str) or not isinstance(misc, str):
+            raise TypeError("Trade leverage and misc must be strings")
+        known = {
+            "ordertxid",
+            "postxid",
+            "pair",
+            "time",
+            "type",
+            "ordertype",
+            "price",
+            "cost",
+            "fee",
+            "vol",
+            "margin",
+            "leverage",
+            "misc",
+            "ledgers",
+        }
+        return TradeHistoryEntry(
+            trade_id=trade_id,
+            order_txid=strings["ordertxid"],
+            position_txid=position_txid,
+            pair=strings["pair"],
+            occurred_at=occurred_at,
+            side=strings["type"],
+            order_type=strings["ordertype"],
+            price=decimals["price"],
+            cost=decimals["cost"],
+            fee=decimals["fee"],
+            volume=decimals["vol"],
+            margin=decimals["margin"],
+            leverage=leverage,
+            misc=misc,
+            ledger_ids=ledger_ids,
+            provider_metadata={
+                str(key): value for key, value in raw.items() if key not in known
+            },
         )
 
     def ledger_preview(

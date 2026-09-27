@@ -149,6 +149,7 @@ def trade(
     fee: str = "0.2",
     ledgers: str = "",
     order: str = "O1",
+    occurred_at: str = "2026-03-06 12:00:00",
 ) -> tuple[str, str, dict[str, str]]:
     return (
         "kraken-trades",
@@ -157,7 +158,7 @@ def trade(
             "txid": txid,
             "ordertxid": order,
             "pair": pair,
-            "time": "2026-03-06 12:00:00",
+            "time": occurred_at,
             "type": side,
             "ordertype": "limit",
             "price": price,
@@ -379,6 +380,100 @@ def test_trade_projection_eur_crypto_fees_and_reconciliation() -> None:
             database.scalar(select(func.count()).select_from(ValuationRequirement))
             == result.valuation_requirements
         )
+
+
+@pytest.mark.parametrize(
+    ("synthetic_id", "occurred_at", "pair", "cost", "volume", "fee", "asset"),
+    [
+        (
+            "SYNTHETIC-2021-DOT",
+            "2021-01-05 12:00:00",
+            "DOTEUR",
+            "599.7599",
+            "75",
+            "1.5594",
+            "DOT",
+        ),
+        (
+            "SYNTHETIC-2021-ADA",
+            "2021-02-12 12:00:00",
+            "ADAEUR",
+            "382.5610",
+            "500",
+            "0.9947",
+            "ADA",
+        ),
+        (
+            "SYNTHETIC-2021-KAVA",
+            "2021-06-01 12:00:00",
+            "KAVAEUR",
+            "987.2531",
+            "350",
+            "2.5668",
+            "KAVA",
+        ),
+        (
+            "SYNTHETIC-2022-ETH",
+            "2022-08-08 12:00:00",
+            "ETHEUR",
+            "3469.8800",
+            "2",
+            "5.5518",
+            "ETH",
+        ),
+    ],
+)
+def test_synthetic_trade_history_examples_feed_existing_trade_projection(
+    synthetic_id: str,
+    occurred_at: str,
+    pair: str,
+    cost: str,
+    volume: str,
+    fee: str,
+    asset: str,
+) -> None:
+    factory = database_factory()
+    result = transform(
+        factory,
+        store_records(
+            factory,
+            [
+                trade(
+                    synthetic_id,
+                    pair,
+                    "buy",
+                    price=str(Decimal(cost) / Decimal(volume)),
+                    cost=cost,
+                    volume=volume,
+                    fee=fee,
+                    occurred_at=occurred_at,
+                )
+            ],
+        ),
+    )
+    assert result.trade_executions == result.acquisitions == 1
+    assert result.valuation_requirements == 2
+    with factory() as database:
+        execution = database.scalar(select(TradeExecution))
+        acquisition = database.scalar(select(AcquisitionLot))
+        fee_event = database.scalar(select(FeeEvent))
+        requirements = tuple(database.scalars(select(ValuationRequirement)))
+        assert execution is not None and acquisition is not None
+        assert fee_event is not None
+        assert execution.external_id == f"kraken:trade:{synthetic_id}"
+        assert execution.raw_pair == pair
+        assert execution.side == "buy"
+        assert execution.cost == Decimal(cost)
+        assert execution.volume == Decimal(volume)
+        assert execution.fee == Decimal(fee)
+        assert acquisition.asset_code == asset
+        assert acquisition.quantity == Decimal(volume)
+        assert acquisition.native_consideration_asset == "EUR"
+        assert acquisition.native_consideration_quantity == Decimal(cost)
+        assert acquisition.valuation_status is ValuationStatus.NATIVE_EUR_AVAILABLE
+        assert fee_event.asset_code == "EUR"
+        assert fee_event.quantity == Decimal(fee)
+        assert all(item.method is ValuationMethod.DIRECT_EUR for item in requirements)
 
 
 @pytest.mark.parametrize(

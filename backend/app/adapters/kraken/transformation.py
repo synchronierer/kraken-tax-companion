@@ -134,6 +134,19 @@ class _Counters:
         )
 
 
+def _trade_cost_is_consistent(
+    *, price: Decimal, volume: Decimal, cost: Decimal
+) -> bool:
+    difference = abs(price * volume - cost)
+    if difference <= COST_TOLERANCE:
+        return True
+    exponent = price.as_tuple().exponent
+    if not isinstance(exponent, int) or exponent >= 0:
+        return False
+    price_quantum = Decimal((0, (1,), exponent))
+    return difference <= volume * price_quantum / Decimal(2)
+
+
 class KrakenTransformationService:
     def __init__(
         self,
@@ -813,7 +826,7 @@ class KrakenTransformationService:
         if min(price, cost, volume) <= 0 or fee < 0:
             self._review(unit, run, record, counters, problems, "trade_amount_invalid")
             return
-        if abs(price * volume - cost) > COST_TOLERANCE:
+        if not _trade_cost_is_consistent(price=price, volume=volume, cost=cost):
             self._review(unit, run, record, counters, problems, "trade_cost_mismatch")
             return
         references = tuple(

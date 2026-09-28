@@ -545,6 +545,62 @@ def test_invalid_trades_become_structured_review(
     assert result.trade_executions == 0
 
 
+def test_trade_cost_accepts_provider_price_precision_without_replacing_cost() -> None:
+    factory = database_factory()
+    result = transform(
+        factory,
+        store_records(
+            factory,
+            [
+                trade(
+                    "T524SF-NNRC6-YI53A5",
+                    "SCEUR",
+                    "buy",
+                    price="0.023248",
+                    volume="43000.00000000",
+                    cost="999.674463",
+                )
+            ],
+        ),
+    )
+
+    assert result.trade_executions == 1
+    assert result.review_cases == 0
+    with factory() as database:
+        execution = database.scalar(select(TradeExecution))
+        assert execution is not None
+        assert execution.cost == Decimal("999.674463")
+
+
+@pytest.mark.parametrize(
+    ("price", "volume", "cost", "accepted"),
+    [
+        ("0.023248", "43000.00000000", "999.6855001", False),
+        ("100", "2", "200.01", True),
+        ("100", "2", "201", False),
+        ("2.00", "1000", "2004", True),
+        ("2", "1000", "2004", False),
+    ],
+)
+def test_trade_cost_validation_uses_displayed_decimal_places(
+    price: str, volume: str, cost: str, accepted: bool
+) -> None:
+    factory = database_factory()
+    result = transform(
+        factory,
+        store_records(
+            factory,
+            [trade("PRECISION", "SCEUR", "buy", price=price, volume=volume, cost=cost)],
+        ),
+    )
+
+    assert result.trade_executions == int(accepted)
+    assert result.review_cases == int(not accepted)
+    assert [problem.code for problem in result.problems] == (
+        [] if accepted else ["trade_cost_mismatch"]
+    )
+
+
 def test_ledger_only_grouping_and_missing_reference() -> None:
     factory = database_factory()
     session_id = store_records(

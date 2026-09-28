@@ -101,12 +101,14 @@ def transform(
     factory: sessionmaker[Session],
     *session_ids: UUID,
     version: str = "kraken-domain-v1",
+    context_session_ids: tuple[UUID, ...] = (),
 ):
     return KrakenTransformationService(
         unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory),
         clock=lambda: NOW,
     ).transform(
         import_session_ids=session_ids,
+        context_import_session_ids=context_session_ids,
         actor_id="test-suite",
         contract_version=version,
     )
@@ -422,6 +424,256 @@ def test_trade_projection_eur_crypto_fees_and_reconciliation() -> None:
         assert (
             database.scalar(select(func.count()).select_from(ValuationRequirement))
             == result.valuation_requirements
+        )
+
+
+def matched_trade_ledger_records() -> list[tuple[str, str, dict[str, str]]]:
+    return [
+        ledger("L-BASE", "trade", "2", asset="XXBT", refid="T-MATCHED"),
+        ledger("L-QUOTE", "trade", "-200", asset="ZEUR", refid="T-MATCHED"),
+    ]
+
+
+def matched_trade_record() -> tuple[str, str, dict[str, str]]:
+    return trade(
+        "T-MATCHED",
+        "XXBTZEUR",
+        "buy",
+        ledgers="L-BASE,L-QUOTE",
+    )
+
+
+def test_matched_trade_ledger_context_becomes_auditable_evidence() -> None:
+    factory = database_factory()
+    ledger_session = store_records(factory, matched_trade_ledger_records())
+    trade_session = store_records(factory, [matched_trade_record()])
+
+    result = transform(
+        factory,
+        ledger_session,
+        version="kraken-domain-v2",
+        context_session_ids=(trade_session,),
+    )
+
+    assert result.status is TransformationStatus.COMPLETED
+    assert result.checked_records == 2
+    assert result.review_cases == result.conflicts == 0
+    assert (
+        result.acquisitions
+        == result.disposals
+        == result.trade_executions
+        == result.fee_events
+        == 0
+    )
+    with factory() as database:
+        decisions = tuple(
+            database.scalars(
+                select(TransformationDecision).where(
+                    TransformationDecision.transformation_run_id == result.run_id
+                )
+            )
+        )
+        assert len(decisions) == 2
+        assert all(item.decision_type is DecisionType.DUPLICATE for item in decisions)
+        assert {item.reason_code for item in decisions} == {
+            "ledger_trade_reconciled_to_trade_history"
+        }
+        assert (
+            database.scalar(select(func.count()).select_from(TransformationIssue)) == 0
+        )
+
+
+def test_trade_ledgers_without_trade_context_still_require_review() -> None:
+    factory = database_factory()
+    ledger_session = store_records(factory, matched_trade_ledger_records())
+
+    result = transform(factory, ledger_session, version="kraken-domain-v2")
+
+    assert result.review_cases == 2
+    assert [problem.code for problem in result.problems] == [
+        "ledger_trade_requires_review",
+        "ledger_trade_requires_review",
+    ]
+
+
+def test_trade_ledgers_can_use_unique_conservative_reconciliation() -> None:
+    factory = database_factory()
+    ledger_session = store_records(factory, matched_trade_ledger_records())
+    trade_session = store_records(
+        factory,
+        [trade("T-MATCHED", "XXBTZEUR", "buy")],
+    )
+
+    result = transform(
+        factory,
+        ledger_session,
+        version="kraken-domain-v2",
+        context_session_ids=(trade_session,),
+    )
+
+    assert result.review_cases == result.conflicts == 0
+    assert not result.problems
+
+
+@pytest.mark.parametrize("malformed_amount", ["NaN", "invalid"])
+def test_malformed_trade_ledger_context_does_not_suppress_or_break_valid_evidence(
+    malformed_amount: str,
+) -> None:
+    factory = database_factory()
+    ledger_session = store_records(factory, matched_trade_ledger_records())
+    malformed_session = store_records(
+        factory,
+        [ledger("MALFORMED", "trade", malformed_amount, refid="OTHER")],
+    )
+    trade_session = store_records(factory, [matched_trade_record()])
+
+    result = transform(
+        factory,
+        ledger_session,
+        version="kraken-domain-v2",
+        context_session_ids=(malformed_session, trade_session),
+    )
+
+    assert result.review_cases == result.conflicts == 0
+
+
+def test_malformed_trade_context_keeps_trade_ledger_reviews() -> None:
+    factory = database_factory()
+    ledger_session = store_records(factory, matched_trade_ledger_records())
+    malformed_trade = matched_trade_record()
+    del malformed_trade[2]["pair"]
+    trade_session = store_records(factory, [malformed_trade])
+
+    result = transform(
+        factory,
+        ledger_session,
+        version="kraken-domain-v2",
+        context_session_ids=(trade_session,),
+    )
+
+    assert result.review_cases == 2
+    assert all(
+        problem.code == "ledger_trade_requires_review" for problem in result.problems
+    )
+
+
+def test_ambiguous_duplicate_trade_context_keeps_trade_ledger_reviews() -> None:
+    factory = database_factory()
+    ledger_session = store_records(factory, matched_trade_ledger_records())
+    first_trade_session = store_records(factory, [matched_trade_record()])
+    second_trade_session = store_records(factory, [matched_trade_record()])
+
+    result = transform(
+        factory,
+        ledger_session,
+        version="kraken-domain-v2",
+        context_session_ids=(first_trade_session, second_trade_session),
+    )
+
+    assert result.review_cases == 2
+    assert all(
+        problem.code == "ledger_trade_requires_review" for problem in result.problems
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_leg",
+        "wrong_asset",
+        "wrong_sign",
+        "wrong_amount",
+        "wrong_refid",
+        "unresolved_pair",
+    ],
+)
+def test_only_fully_reconciled_trade_ledgers_suppress_reviews(case: str) -> None:
+    factory = database_factory()
+    ledger_records = matched_trade_ledger_records()
+    trade_record = matched_trade_record()
+    if case == "missing_leg":
+        ledger_records.pop()
+    elif case == "wrong_asset":
+        ledger_records[0] = ledger(
+            "L-BASE", "trade", "2", asset="XETH", refid="T-MATCHED"
+        )
+    elif case == "wrong_sign":
+        ledger_records[1] = ledger(
+            "L-QUOTE", "trade", "200", asset="ZEUR", refid="T-MATCHED"
+        )
+    elif case == "wrong_amount":
+        ledger_records[1] = ledger(
+            "L-QUOTE", "trade", "-201", asset="ZEUR", refid="T-MATCHED"
+        )
+    elif case == "wrong_refid":
+        ledger_records = [
+            ledger("L-BASE", "trade", "2", asset="XXBT", refid="WRONG"),
+            ledger("L-QUOTE", "trade", "-200", asset="ZEUR", refid="WRONG"),
+        ]
+    else:
+        trade_record = trade("T-MATCHED", "UNKNOWN", "buy", ledgers="L-BASE,L-QUOTE")
+    ledger_session = store_records(factory, ledger_records)
+    trade_session = store_records(factory, [trade_record])
+
+    result = transform(
+        factory,
+        ledger_session,
+        version="kraken-domain-v2",
+        context_session_ids=(trade_session,),
+    )
+
+    assert result.review_cases == len(ledger_records)
+    assert all(
+        problem.code == "ledger_trade_requires_review" for problem in result.problems
+    )
+
+
+@pytest.mark.parametrize("trade_first", [False, True])
+def test_reconciled_trade_evidence_is_independent_of_target_session_order(
+    trade_first: bool,
+) -> None:
+    factory = database_factory()
+    ledger_session = store_records(factory, matched_trade_ledger_records())
+    trade_session = store_records(factory, [matched_trade_record()])
+    sessions = (
+        (trade_session, ledger_session)
+        if trade_first
+        else (ledger_session, trade_session)
+    )
+
+    first = transform(factory, *sessions, version="kraken-domain-v2")
+    with factory() as database:
+        first_domain_counts = tuple(
+            database.scalar(select(func.count()).select_from(entity))
+            for entity in (AcquisitionLot, DisposalEvent, TradeExecution, FeeEvent)
+        )
+        evidence = tuple(
+            database.scalars(
+                select(TransformationDecision).where(
+                    TransformationDecision.transformation_run_id == first.run_id,
+                    TransformationDecision.reason_code
+                    == "ledger_trade_reconciled_to_trade_history",
+                )
+            )
+        )
+
+    second = transform(factory, *reversed(sessions), version="kraken-domain-v2")
+
+    assert first.review_cases == first.conflicts == 0
+    assert first.trade_executions == first.acquisitions == first.fee_events == 1
+    assert first.disposals == 0
+    assert len(evidence) == 2
+    assert second.review_cases == second.conflicts == 0
+    assert second.trade_executions == second.acquisitions == second.disposals == 0
+    assert second.fee_events == 0
+    assert second.reused_objects == 1
+    with factory() as database:
+        assert (
+            tuple(
+                database.scalar(select(func.count()).select_from(entity))
+                for entity in (AcquisitionLot, DisposalEvent, TradeExecution, FeeEvent)
+            )
+            == first_domain_counts
         )
 
 

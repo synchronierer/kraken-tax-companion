@@ -14,6 +14,11 @@ from app.adapters.kraken.assets import (
     resolve_asset_legacy_v1,
     resolve_pair,
 )
+from app.adapters.kraken.ledger import CanonicalKrakenLedgerRecord, canonical_from_api
+from app.adapters.kraken.trade_reconciliation import (
+    TradeLedgerReconciliationStatus,
+    reconcile_trade_ledgers,
+)
 from app.core.entities import AuditActorType, AuditEvent, RawImportRecord
 from app.core.time import utc_now
 from app.core.transformation import (
@@ -40,6 +45,7 @@ from app.core.transformation import (
 )
 from app.core.unit_of_work import UnitOfWork
 from app.imports.hashing import canonical_sha256
+from app.infrastructure.kraken_private import LedgerEntry, TradeHistoryEntry
 from app.transformations.state_machine import transition_transformation
 
 INTERNAL_SUBTYPES = frozenset(
@@ -197,7 +203,15 @@ class KrakenTransformationService:
                 context_records = unit.raw_imports.list_by_import_sessions(
                     context_import_session_ids
                 )
-                ledger_groups = self._ledger_groups((*records, *context_records))
+                all_records = tuple(
+                    {
+                        record.id: record for record in (*records, *context_records)
+                    }.values()
+                )
+                ledger_groups = self._ledger_groups(all_records)
+                reconciled_trade_ledgers = _reconciled_trade_ledger_record_ids(
+                    all_records
+                )
                 grouped_ids = {
                     record.id
                     for group in ledger_groups.values()
@@ -210,7 +224,14 @@ class KrakenTransformationService:
                             unit, run, record, ledger_groups, counters, problems
                         )
                     elif record.source == "kraken-ledgers":
-                        self._transform_ledger(unit, run, record, counters, problems)
+                        self._transform_ledger(
+                            unit,
+                            run,
+                            record,
+                            counters,
+                            problems,
+                            reconciled_trade_ledgers,
+                        )
                     elif record.source == "kraken-trades":
                         self._transform_trade(unit, run, record, counters, problems)
                     else:
@@ -659,10 +680,24 @@ class KrakenTransformationService:
         record: RawImportRecord,
         counters: _Counters,
         problems: list[TransformationProblem],
+        reconciled_trade_ledgers: frozenset[UUID],
     ) -> None:
         values = _values(record)
         kind = values.get("type", "").lower()
         subtype = values.get("subtype", "").lower()
+        if kind == "trade" and record.id in reconciled_trade_ledgers:
+            self._decision(
+                unit,
+                run,
+                record,
+                DecisionType.DUPLICATE,
+                "ledger_trade_reconciled_to_trade_history",
+                (
+                    "Kraken ledger trade leg is supporting evidence for a fully "
+                    "reconciled TradesHistory trade."
+                ),
+            )
+            return
         if subtype in INTERNAL_SUBTYPES or kind in INTERNAL_SUBTYPES:
             counters.internal += 1
             self._decision(
@@ -1266,6 +1301,102 @@ class KrakenTransformationService:
                 metadata={"contract_version": run.contract_version, **metadata},
             )
         )
+
+
+def _reconciled_trade_ledger_record_ids(
+    records: Sequence[RawImportRecord],
+) -> frozenset[UUID]:
+    ledger_records: dict[str, list[RawImportRecord]] = defaultdict(list)
+    canonical_ledgers: list[CanonicalKrakenLedgerRecord] = []
+    trades: list[TradeHistoryEntry] = []
+    for record in records:
+        if record.source == "kraken-ledgers":
+            ledger = _canonical_trade_ledger(record)
+            if ledger is not None:
+                canonical_ledgers.append(ledger)
+                ledger_records[ledger.ledger_id].append(record)
+        elif record.source == "kraken-trades":
+            trade = _trade_history_entry(record)
+            if trade is not None:
+                trades.append(trade)
+
+    matched_ledger_counts: defaultdict[str, int] = defaultdict(int)
+    for trade in trades:
+        reconciliation = reconcile_trade_ledgers(trade, tuple(canonical_ledgers))
+        if reconciliation.status is TradeLedgerReconciliationStatus.MATCHED:
+            for ledger_id in reconciliation.matched_ledger_ids:
+                matched_ledger_counts[ledger_id] += 1
+
+    return frozenset(
+        ledger_records[ledger_id][0].id
+        for ledger_id, count in matched_ledger_counts.items()
+        if count == 1 and len(ledger_records[ledger_id]) == 1
+    )
+
+
+def _canonical_trade_ledger(
+    record: RawImportRecord,
+) -> CanonicalKrakenLedgerRecord | None:
+    values = _values(record)
+    if values.get("type", "").lower() != "trade":
+        return None
+    try:
+        entry = LedgerEntry(
+            ledger_id=values["txid"],
+            occurred_at=_timestamp(values["time"]),
+            entry_type="trade",
+            subtype=values.get("api_subtype", values.get("subtype", "")),
+            asset=values["asset"],
+            amount=Decimal(values["amount"]),
+            fee=Decimal(values.get("fee", "0")),
+            extra={"refid": values.get("refid", "")},
+        )
+        if not entry.amount.is_finite() or not entry.fee.is_finite():
+            return None
+        return canonical_from_api(entry)
+    except (InvalidOperation, KeyError, ValueError):
+        return None
+
+
+def _trade_history_entry(record: RawImportRecord) -> TradeHistoryEntry | None:
+    values = _values(record)
+    try:
+        price = Decimal(values["price"])
+        cost = Decimal(values["cost"])
+        fee = Decimal(values.get("fee", "0"))
+        volume = Decimal(values["vol"])
+        side = values["type"].lower()
+        if (
+            side not in {"buy", "sell"}
+            or not all(value.is_finite() for value in (price, cost, fee, volume))
+            or min(price, cost, volume) <= 0
+            or fee < 0
+        ):
+            return None
+        return TradeHistoryEntry(
+            trade_id=values["txid"],
+            order_txid=values["ordertxid"],
+            position_txid=values.get("postxid") or None,
+            pair=values["pair"],
+            occurred_at=_timestamp(values["time"]),
+            side=side,
+            order_type=values["ordertype"],
+            price=price,
+            cost=cost,
+            fee=fee,
+            volume=volume,
+            margin=Decimal(values.get("margin", "0")),
+            leverage=values.get("leverage", ""),
+            misc=values.get("misc", ""),
+            ledger_ids=tuple(
+                item.strip()
+                for item in values.get("ledgers", "").split(",")
+                if item.strip()
+            ),
+            provider_metadata={},
+        )
+    except (InvalidOperation, KeyError, ValueError):
+        return None
 
 
 def _values(record: RawImportRecord) -> dict[str, str]:

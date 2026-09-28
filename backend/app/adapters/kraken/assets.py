@@ -26,6 +26,7 @@ ASSET_ALIASES = {
     "XLTC": "LTC",
     "XDG": "DOGE",
     "XXDG": "DOGE",
+    "XXLM": "XLM",
     "ZGBP": "GBP",
     "ZCAD": "CAD",
     "ZJPY": "JPY",
@@ -156,4 +157,31 @@ def resolve_pair(raw_pair: str) -> ResolvedPair | None:
         (candidate.base.canonical_code, candidate.quote.canonical_code): candidate
         for candidate in candidates
     }
-    return next(iter(unique.values())) if len(unique) == 1 else None
+    if unique:
+        return next(iter(unique.values())) if len(unique) == 1 else None
+
+    quote_suffixes = tuple(
+        raw_code
+        for raw_code, canonical_code in ASSET_ALIASES.items()
+        if canonical_code in FIAT_ASSETS and raw_pair.endswith(raw_code)
+    )
+    if not quote_suffixes:
+        return None
+    plain_quote_suffixes = tuple(
+        item for item in quote_suffixes if ASSET_ALIASES[item] == item
+    )
+    if plain_quote_suffixes:
+        quote_suffixes = plain_quote_suffixes
+    for quote_raw in quote_suffixes:
+        base_raw = raw_pair[: -len(quote_raw)]
+        if not base_raw:
+            continue
+        base = resolve_asset(base_raw)
+        quote = resolve_asset(quote_raw)
+        if base.canonical_code is not None and quote.canonical_code is not None:
+            candidates.append(ResolvedPair(raw_pair=raw_pair, base=base, quote=quote))
+    fallback = {
+        (candidate.base.canonical_code, candidate.quote.canonical_code): candidate
+        for candidate in candidates
+    }
+    return next(iter(fallback.values())) if len(fallback) == 1 else None

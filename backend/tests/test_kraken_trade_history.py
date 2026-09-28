@@ -111,10 +111,20 @@ def history_trade(
     trade_id: str = "SYNTHETIC-TRADE",
     side: str = "buy",
     ledger_ids: tuple[str, ...] = (),
+    pair: str = "DOTEUR",
+    cost: str = "599.7599",
+    volume: str = "75",
 ) -> TradeHistoryEntry:
     return KrakenPrivateClient._parse_trade(
         trade_id,
-        raw_trade(trade_id, side=side, ledgers=ledger_ids)[1],
+        raw_trade(
+            trade_id,
+            side=side,
+            ledgers=ledger_ids,
+            pair=pair,
+            cost=cost,
+            volume=volume,
+        )[1],
     )
 
 
@@ -414,6 +424,107 @@ def test_trade_ledger_reconciliation_all_statuses_and_sell() -> None:
     assert fallback.status is TradeLedgerReconciliationStatus.MATCHED
 
 
+@pytest.mark.parametrize(
+    ("pair", "cost", "base_asset", "volume", "ledger_cost"),
+    [
+        ("DOTEUR", "599.75989", "DOT", "75.00000000", "-599.7599"),
+        ("LINKEUR", "214.249600", "LINK", "10.00000000", "-214.2495"),
+    ],
+)
+def test_trade_reconciliation_accepts_narrow_provider_quote_rounding(
+    pair: str,
+    cost: str,
+    base_asset: str,
+    volume: str,
+    ledger_cost: str,
+) -> None:
+    trade = history_trade(
+        ledger_ids=("ROUND-BASE", "ROUND-QUOTE"),
+        pair=pair,
+        cost=cost,
+        volume=volume,
+    )
+    result = reconcile_trade_ledgers(
+        trade,
+        (
+            ledger("ROUND-BASE", base_asset, volume),
+            ledger("ROUND-QUOTE", "ZEUR", ledger_cost),
+        ),
+    )
+    assert result.status is TradeLedgerReconciliationStatus.MATCHED
+
+
+def test_trade_reconciliation_rejects_values_outside_narrow_tolerance() -> None:
+    trade = history_trade(
+        ledger_ids=("LINK-BASE", "LINK-QUOTE"),
+        pair="LINKEUR",
+        cost="214.249600",
+        volume="10.00000000",
+    )
+    base = ledger("LINK-BASE", "LINK", "10.00000000")
+    assert (
+        reconcile_trade_ledgers(
+            trade,
+            (base, ledger("LINK-QUOTE", "ZEUR", "-214.2494")),
+        ).status
+        is TradeLedgerReconciliationStatus.CONFLICT
+    )
+    assert (
+        reconcile_trade_ledgers(
+            trade,
+            (base, ledger("LINK-QUOTE", "ZEUR", "214.2495")),
+        ).status
+        is TradeLedgerReconciliationStatus.CONFLICT
+    )
+    assert (
+        reconcile_trade_ledgers(
+            trade,
+            (base, ledger("LINK-QUOTE", "XETH", "-214.2495")),
+        ).status
+        is TradeLedgerReconciliationStatus.CONFLICT
+    )
+    assert (
+        reconcile_trade_ledgers(
+            trade,
+            (
+                ledger("LINK-BASE", "LINK", "10.00000000", refid="WRONG"),
+                ledger("LINK-QUOTE", "ZEUR", "-214.2495", refid="WRONG"),
+            ),
+        ).status
+        is TradeLedgerReconciliationStatus.CONFLICT
+    )
+    assert (
+        reconcile_trade_ledgers(
+            trade,
+            (
+                ledger("LINK-BASE", "LINK", "10.00000001"),
+                ledger("LINK-QUOTE", "ZEUR", "-214.2495"),
+            ),
+        ).status
+        is TradeLedgerReconciliationStatus.CONFLICT
+    )
+
+
+def test_trade_reconciliation_fallback_uses_same_precision_rules() -> None:
+    trade = history_trade(pair="DOTEUR", cost="599.75989")
+    result = reconcile_trade_ledgers(
+        trade,
+        (
+            ledger("FALLBACK-BASE", "DOT", "75.0000000000", refid=""),
+            ledger("FALLBACK-QUOTE", "ZEUR", "-599.7599", refid=""),
+        ),
+    )
+    assert result.status is TradeLedgerReconciliationStatus.MATCHED
+    wrong_reference = reconcile_trade_ledgers(
+        trade,
+        (
+            ledger("WRONG-BASE", "DOT", "75.0000000000", refid="OTHER"),
+            ledger("WRONG-QUOTE", "ZEUR", "-599.7599", refid="OTHER"),
+        ),
+    )
+    assert wrong_reference.status is TradeLedgerReconciliationStatus.PENDING
+
+
 def test_trade_reconciliation_is_conservative_for_ambiguity_and_bad_pair() -> None:
     trade = history_trade()
     ambiguous = reconcile_trade_ledgers(
@@ -457,12 +568,12 @@ def test_trade_reconciliation_is_conservative_for_ambiguity_and_bad_pair() -> No
     )
     assert wrong_ref.status is TradeLedgerReconciliationStatus.CONFLICT
     bad_pair = KrakenPrivateClient._parse_trade(
-        "BAD-PAIR", raw_trade("BAD-PAIR", pair="UNKNOWNPAIR", ledgers=())[1]
+        "BAD-PAIR",
+        raw_trade("BAD-PAIR", pair="UNKNOWNPAIR", ledgers=("KNOWN-ID",))[1],
     )
-    assert (
-        reconcile_trade_ledgers(bad_pair, ()).status
-        is TradeLedgerReconciliationStatus.CONFLICT
-    )
+    unresolved = reconcile_trade_ledgers(bad_pair, ())
+    assert unresolved.status is TradeLedgerReconciliationStatus.CONFLICT
+    assert unresolved.missing_ledger_ids == ()
 
 
 def test_trade_preview_api_is_read_only_and_returns_reconciliation(

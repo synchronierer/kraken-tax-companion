@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app import models
 from app.adapters.kraken.assets import (
+    ASSET_ALIASES,
     ASSET_MAPPING_VERSION,
     LEGACY_ASSET_MAPPING_VERSION,
     normalize_kraken_asset,
@@ -185,6 +186,7 @@ def trade(
         ("XLTC", "LTC"),
         ("XXDG", "DOGE"),
         ("XDG", "DOGE"),
+        ("XXLM", "XLM"),
         ("USD", "USD"),
         ("ZUSD", "USD"),
     ],
@@ -233,6 +235,47 @@ def test_pair_resolution_is_conservative(raw: str, expected: tuple[str, str]) ->
     assert resolve_pair("BTC/XUNKNOWN") is not None
     assert resolve_pair("BTC/X!") is None
     assert resolve_pair("UNKNOWNPAIR") is None
+    assert resolve_pair("EUR") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_base"),
+    [
+        ("DOTEUR", "DOT"),
+        ("XDGEUR", "DOGE"),
+        ("LINKEUR", "LINK"),
+        ("ADAEUR", "ADA"),
+        ("GRTEUR", "GRT"),
+        ("XXLMZEUR", "XLM"),
+        ("SCEUR", "SC"),
+        ("KEEPEUR", "KEEP"),
+        ("MANAEUR", "MANA"),
+        ("KAVAEUR", "KAVA"),
+        ("OCEANEUR", "OCEAN"),
+        ("ATOMEUR", "ATOM"),
+        ("MINAEUR", "MINA"),
+        ("XTZEUR", "XTZ"),
+        ("BCHEUR", "BCH"),
+        ("XXBTZEUR", "BTC"),
+        ("XETHZEUR", "ETH"),
+    ],
+)
+def test_compact_eur_pair_resolution_supports_identity_bases(
+    raw: str, expected_base: str
+) -> None:
+    pair = resolve_pair(raw)
+    assert pair is not None
+    assert pair.base.canonical_code == expected_base
+    assert pair.quote.canonical_code == "EUR"
+
+
+def test_compact_pair_resolution_rejects_ambiguous_explicit_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(ASSET_ALIASES, "A", "A")
+    monkeypatch.setitem(ASSET_ALIASES, "AB", "AB")
+    monkeypatch.setitem(ASSET_ALIASES, "BEUR", "EUR")
+    assert resolve_pair("ABEUR") is None
 
 
 def test_domain_guards_and_transformation_state_machine() -> None:

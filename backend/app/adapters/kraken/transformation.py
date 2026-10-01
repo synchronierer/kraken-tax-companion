@@ -771,6 +771,26 @@ class KrakenTransformationService:
                 {"raw_id": str(record.id)},
             )
             return
+        if _is_futures_spot_internal_transfer(record, values):
+            counters.internal += 1
+            self._decision(
+                unit,
+                run,
+                record,
+                DecisionType.INTERNAL_MOVEMENT,
+                "ledger_futures_spot_internal_transfer",
+                (
+                    "Kraken ledger subtype identifies an internal transfer "
+                    "between Futures and Spot balances."
+                ),
+            )
+            self._audit(
+                unit,
+                run,
+                "transformation.internal_movement",
+                {"raw_id": str(record.id)},
+            )
+            return
         reward = kind == "earn" and subtype == "reward"
         legacy = kind == "staking" and not subtype
         if reward or legacy:
@@ -1479,6 +1499,26 @@ def _is_fiat_funding_movement(record: RawImportRecord, values: dict[str, str]) -
     if amount is None or fee is None or fee < 0:
         return False
     return amount > 0 if kind == "deposit" else amount < 0
+
+
+def _is_futures_spot_internal_transfer(
+    record: RawImportRecord, values: dict[str, str]
+) -> bool:
+    subtype = values.get("subtype", "").lower()
+    if (
+        record.source != "kraken-ledgers"
+        or values.get("type", "").lower() != "transfer"
+        or subtype not in {"spotfromfutures", "spottofutures"}
+    ):
+        return False
+    asset = normalize_kraken_asset(values.get("asset", ""))
+    if not asset.is_unambiguous or asset.normalized_asset is None:
+        return False
+    amount = _optional_finite_decimal(values.get("amount", ""))
+    fee = _optional_finite_decimal(values.get("fee", ""))
+    if amount is None or amount == 0 or fee != 0:
+        return False
+    return amount > 0 if subtype == "spotfromfutures" else amount < 0
 
 
 def _canonical_trade_ledger(

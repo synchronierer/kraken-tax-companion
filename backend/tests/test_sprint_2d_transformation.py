@@ -547,7 +547,17 @@ def test_invalid_autoallocation_groups_remain_transfer_reviews(
     )
 
 
-def test_spotfromfutures_transfer_remains_review() -> None:
+@pytest.mark.parametrize(
+    ("subtype", "asset", "amount"),
+    [
+        ("spotfromfutures", "ETHW", "2.0000057"),
+        ("spotfromfutures", "STRK", "179.00840"),
+        ("spottofutures", "XXBT", "-0.125"),
+    ],
+)
+def test_strict_futures_spot_transfers_are_internal(
+    subtype: str, asset: str, amount: str
+) -> None:
     factory = database_factory()
     session_id = store_records(
         factory,
@@ -555,9 +565,9 @@ def test_spotfromfutures_transfer_remains_review() -> None:
             ledger(
                 "FUTURES",
                 "transfer",
-                "1",
-                asset="ETHW",
-                subtype="spotfromfutures",
+                amount,
+                asset=asset,
+                subtype=subtype,
                 refid="FUTURES-REF",
             )
         ],
@@ -565,9 +575,175 @@ def test_spotfromfutures_transfer_remains_review() -> None:
 
     result = transform(factory, session_id, version="kraken-domain-v2")
 
+    assert result.status is TransformationStatus.COMPLETED
+    assert result.internal_movements == 1
+    assert result.review_cases == result.conflicts == 0
+    assert (
+        result.acquisitions
+        == result.disposals
+        == result.trade_executions
+        == result.fee_events
+        == result.valuation_requirements
+        == 0
+    )
+    with factory() as database:
+        decision = database.scalar(select(TransformationDecision))
+        assert decision is not None
+        assert decision.decision_type is DecisionType.INTERNAL_MOVEMENT
+        assert decision.reason_code == "ledger_futures_spot_internal_transfer"
+        assert (
+            database.scalar(select(func.count()).select_from(TransformationIssue)) == 0
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "subtype", "asset", "amount", "fee", "reason"),
+    [
+        (
+            "transfer",
+            "spotfromfutures",
+            "ETHW",
+            "-1",
+            "0",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "transfer",
+            "spottofutures",
+            "ETHW",
+            "1",
+            "0",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "transfer",
+            "spotfromfutures",
+            "ETHW",
+            "0",
+            "0",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "transfer",
+            "spotfromfutures",
+            "ETHW",
+            "1",
+            "0.01",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "transfer",
+            "spotfromfutures",
+            "ETHW",
+            "invalid",
+            "0",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "transfer",
+            "spotfromfutures",
+            "ETHW",
+            "NaN",
+            "0",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "transfer",
+            "spotfromfutures",
+            "ETHW",
+            "1",
+            "invalid",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "transfer",
+            "spotfromfutures",
+            "ETHW",
+            "1",
+            "Infinity",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "transfer",
+            "spotfromfutures",
+            "ETHW",
+            "1",
+            "-0.01",
+            "ledger_transfer_requires_review",
+        ),
+        (
+            "deposit",
+            "spotfromfutures",
+            "ETHW",
+            "1",
+            "0",
+            "ledger_deposit_requires_review",
+        ),
+        (
+            "transfer",
+            "spotfromfutures",
+            "?",
+            "1",
+            "0",
+            "ledger_transfer_requires_review",
+        ),
+    ],
+)
+def test_invalid_futures_spot_transfers_remain_review(
+    kind: str, subtype: str, asset: str, amount: str, fee: str, reason: str
+) -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [
+            ledger(
+                "FUTURES-REVIEW",
+                kind,
+                amount,
+                asset=asset,
+                fee=fee,
+                subtype=subtype,
+            )
+        ],
+    )
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
     assert result.internal_movements == 0
     assert result.review_cases == 1
-    assert result.problems[0].code == "ledger_transfer_requires_review"
+    assert result.problems[0].code == reason
+
+
+def test_futures_spot_transfer_is_idempotent_without_domain_projections() -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [
+            ledger(
+                "FUTURES-IDEMPOTENT",
+                "transfer",
+                "2.0000057",
+                asset="ETHW",
+                subtype="spotfromfutures",
+            )
+        ],
+    )
+
+    first = transform(factory, session_id, version="kraken-domain-v2")
+    second = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert first.internal_movements == second.internal_movements == 1
+    assert first.review_cases == second.review_cases == 0
+    with factory() as database:
+        for entity in (
+            AcquisitionLot,
+            DisposalEvent,
+            TradeExecution,
+            FeeEvent,
+            ValuationRequirement,
+        ):
+            assert database.scalar(select(func.count()).select_from(entity)) == 0
 
 
 def test_autoallocation_pair_can_span_target_and_context_sessions() -> None:

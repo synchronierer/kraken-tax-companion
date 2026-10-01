@@ -10,6 +10,7 @@ from uuid import UUID
 from app.adapters.kraken.assets import (
     ASSET_MAPPING_VERSION,
     FIAT_ASSETS,
+    normalize_kraken_asset,
     resolve_asset,
     resolve_asset_legacy_v1,
     resolve_pair,
@@ -140,6 +141,15 @@ class _Counters:
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class _AutoallocationCandidate:
+    record_id: UUID
+    occurred_at: datetime | None
+    product_variant: str | None
+    amount: Decimal | None
+    fee: Decimal | None
+
+
 def _trade_cost_is_consistent(
     *, price: Decimal, volume: Decimal, cost: Decimal
 ) -> bool:
@@ -212,6 +222,9 @@ class KrakenTransformationService:
                 reconciled_trade_ledgers = _reconciled_trade_ledger_record_ids(
                     all_records
                 )
+                internal_autoallocation_records = _internal_autoallocation_record_ids(
+                    all_records
+                )
                 grouped_ids = {
                     record.id
                     for group in ledger_groups.values()
@@ -231,6 +244,7 @@ class KrakenTransformationService:
                             counters,
                             problems,
                             reconciled_trade_ledgers,
+                            internal_autoallocation_records,
                         )
                     elif record.source == "kraken-trades":
                         self._transform_trade(unit, run, record, counters, problems)
@@ -681,10 +695,31 @@ class KrakenTransformationService:
         counters: _Counters,
         problems: list[TransformationProblem],
         reconciled_trade_ledgers: frozenset[UUID],
+        internal_autoallocation_records: frozenset[UUID],
     ) -> None:
         values = _values(record)
         kind = values.get("type", "").lower()
         subtype = values.get("subtype", "").lower()
+        if record.id in internal_autoallocation_records:
+            counters.internal += 1
+            self._decision(
+                unit,
+                run,
+                record,
+                DecisionType.INTERNAL_MOVEMENT,
+                "ledger_autoallocation_internal_pair",
+                (
+                    "An exactly balanced Kraken autoallocation base/.F pair with "
+                    "the same RefID and provider timestamp is an internal movement."
+                ),
+            )
+            self._audit(
+                unit,
+                run,
+                "transformation.internal_movement",
+                {"raw_id": str(record.id)},
+            )
+            return
         if kind == "trade" and record.id in reconciled_trade_ledgers:
             self._decision(
                 unit,
@@ -715,11 +750,14 @@ class KrakenTransformationService:
                 {"raw_id": str(record.id)},
             )
             return
-        amount = Decimal(values.get("amount", "0"))
         reward = kind == "earn" and subtype == "reward"
         legacy = kind == "staking" and not subtype
         if reward or legacy:
-            if amount <= 0:
+            try:
+                amount = Decimal(values.get("amount", "0"))
+            except InvalidOperation:
+                amount = Decimal("NaN")
+            if not amount.is_finite() or amount <= 0:
                 self._review(
                     unit,
                     run,
@@ -1332,6 +1370,76 @@ def _reconciled_trade_ledger_record_ids(
         for ledger_id, count in matched_ledger_counts.items()
         if count == 1 and len(ledger_records[ledger_id]) == 1
     )
+
+
+def _internal_autoallocation_record_ids(
+    records: Sequence[RawImportRecord],
+) -> frozenset[UUID]:
+    groups: defaultdict[tuple[str, str], list[_AutoallocationCandidate]] = defaultdict(
+        list
+    )
+    for record in records:
+        values = _values(record)
+        if (
+            record.source != "kraken-ledgers"
+            or values.get("type", "").lower() != "transfer"
+            or values.get("subtype", "").lower() != "autoallocation"
+        ):
+            continue
+        reference = values.get("refid", "")
+        asset = normalize_kraken_asset(values.get("asset", ""))
+        if (
+            not reference.strip()
+            or not asset.is_unambiguous
+            or asset.normalized_asset is None
+        ):
+            continue
+        groups[(reference, asset.normalized_asset)].append(
+            _AutoallocationCandidate(
+                record_id=record.id,
+                occurred_at=_optional_timestamp(values.get("time", "")),
+                product_variant=asset.product_variant,
+                amount=_optional_finite_decimal(values.get("amount", "")),
+                fee=_optional_finite_decimal(values.get("fee", "")),
+            )
+        )
+
+    internal: set[UUID] = set()
+    for candidates in groups.values():
+        if len(candidates) != 2:
+            continue
+        first, second = candidates
+        variants = {first.product_variant, second.product_variant}
+        if (
+            variants != {None, "F"}
+            or first.occurred_at is None
+            or first.occurred_at != second.occurred_at
+            or first.amount is None
+            or second.amount is None
+            or first.amount == 0
+            or second.amount == 0
+            or first.amount + second.amount != 0
+            or first.fee != 0
+            or second.fee != 0
+        ):
+            continue
+        internal.update((first.record_id, second.record_id))
+    return frozenset(internal)
+
+
+def _optional_finite_decimal(value: str) -> Decimal | None:
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _optional_timestamp(value: str) -> datetime | None:
+    try:
+        return _timestamp(value)
+    except ValueError:
+        return None
 
 
 def _canonical_trade_ledger(

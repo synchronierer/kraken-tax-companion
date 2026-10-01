@@ -326,6 +326,7 @@ def test_rewards_internal_movements_and_review_cases() -> None:
         ledger("R6", "staking", "1", subtype="future"),
         ledger("R7", "earn", "1", asset="XUNKNOWN", subtype="reward"),
         ledger("R8", "earn", "1", fee="2", subtype="reward"),
+        ledger("R9", "earn", "invalid", subtype="reward"),
         ledger("U1", "future", "1"),
     ]
     records.extend(
@@ -349,7 +350,7 @@ def test_rewards_internal_movements_and_review_cases() -> None:
     assert result.rewards == 2
     assert result.acquisitions == 2
     assert result.internal_movements == 8
-    assert result.review_cases == 6
+    assert result.review_cases == 7
     assert result.valuation_requirements == 2
     with factory() as database:
         lots = tuple(database.scalars(select(AcquisitionLot)))
@@ -368,6 +369,256 @@ def test_rewards_internal_movements_and_review_cases() -> None:
             )
             == 8
         )
+
+
+def autoallocation_pair(
+    *,
+    base_asset: str = "ADA",
+    funded_asset: str = "ADA.F",
+    base_amount: str = "-0.70429306",
+    funded_amount: str = "0.70429306",
+    base_refid: str = "AUTO-PAIR",
+    funded_refid: str = "AUTO-PAIR",
+    base_time: str = "2026-03-06 12:00:00",
+    funded_time: str = "2026-03-06 12:00:00",
+    base_fee: str = "0",
+    funded_fee: str = "0",
+) -> list[tuple[str, str, dict[str, str]]]:
+    return [
+        ledger(
+            "AUTO-BASE",
+            "transfer",
+            base_amount,
+            asset=base_asset,
+            fee=base_fee,
+            subtype="autoallocation",
+            refid=base_refid,
+            occurred_at=base_time,
+        ),
+        ledger(
+            "AUTO-FUNDED",
+            "transfer",
+            funded_amount,
+            asset=funded_asset,
+            fee=funded_fee,
+            subtype="autoallocation",
+            refid=funded_refid,
+            occurred_at=funded_time,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("base_asset", "funded_asset", "base_amount", "funded_amount"),
+    [
+        ("ADA", "ADA.F", "-0.70429306", "0.70429306"),
+        ("ADA", "ADA.F", "0.70429306", "-0.70429306"),
+        ("XETH", "XETH.F", "-0.0049995536", "0.0049995536"),
+        ("XXBT", "XXBT.F", "-0.0846647370", "0.0846647370"),
+    ],
+)
+def test_strict_autoallocation_pairs_are_internal_movements(
+    base_asset: str,
+    funded_asset: str,
+    base_amount: str,
+    funded_amount: str,
+) -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        autoallocation_pair(
+            base_asset=base_asset,
+            funded_asset=funded_asset,
+            base_amount=base_amount,
+            funded_amount=funded_amount,
+        ),
+    )
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED
+    assert result.internal_movements == 2
+    assert result.review_cases == result.conflicts == 0
+    assert (
+        result.acquisitions
+        == result.disposals
+        == result.trade_executions
+        == result.fee_events
+        == result.valuation_requirements
+        == 0
+    )
+    with factory() as database:
+        decisions = tuple(database.scalars(select(TransformationDecision)))
+        assert len(decisions) == 2
+        assert all(
+            item.decision_type is DecisionType.INTERNAL_MOVEMENT for item in decisions
+        )
+        assert {item.reason_code for item in decisions} == {
+            "ledger_autoallocation_internal_pair"
+        }
+        assert (
+            database.scalar(select(func.count()).select_from(TransformationIssue)) == 0
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_reviews"),
+    [
+        ("missing_leg", 1),
+        ("different_refid", 2),
+        ("different_timestamp", 2),
+        ("invalid_timestamp", 2),
+        ("different_amount", 2),
+        ("base_fee", 2),
+        ("funded_fee", 2),
+        ("base_base", 2),
+        ("funded_funded", 2),
+        ("three_candidates", 3),
+        ("zero_amount", 2),
+        ("invalid_amount", 2),
+        ("non_finite_amount", 2),
+        ("invalid_fee", 2),
+        ("non_finite_fee", 2),
+        ("invalid_asset", 2),
+        ("wrong_variant", 2),
+        ("empty_refid", 2),
+    ],
+)
+def test_invalid_autoallocation_groups_remain_transfer_reviews(
+    case: str, expected_reviews: int
+) -> None:
+    factory = database_factory()
+    records = autoallocation_pair()
+    if case == "missing_leg":
+        records.pop()
+    elif case == "different_refid":
+        records[1][2]["refid"] = "OTHER"
+    elif case == "different_timestamp":
+        records[1][2]["time"] = "2026-03-06 12:00:01"
+    elif case == "invalid_timestamp":
+        records[1][2]["time"] = "invalid"
+    elif case == "different_amount":
+        records[1][2]["amount"] = "0.70429307"
+    elif case == "base_fee":
+        records[0][2]["fee"] = "0.00000001"
+    elif case == "funded_fee":
+        records[1][2]["fee"] = "0.00000001"
+    elif case == "base_base":
+        records[1][2]["asset"] = "ADA"
+    elif case == "funded_funded":
+        records[0][2]["asset"] = "ADA.F"
+    elif case == "three_candidates":
+        records.append(
+            ledger(
+                "AUTO-THIRD",
+                "transfer",
+                "0.70429306",
+                asset="ADA.F",
+                subtype="autoallocation",
+                refid="AUTO-PAIR",
+            )
+        )
+    elif case == "zero_amount":
+        records[0][2]["amount"] = records[1][2]["amount"] = "0"
+    elif case == "invalid_amount":
+        records[0][2]["amount"] = "invalid"
+    elif case == "non_finite_amount":
+        records[0][2]["amount"] = "NaN"
+    elif case == "invalid_fee":
+        records[0][2]["fee"] = "invalid"
+    elif case == "non_finite_fee":
+        records[0][2]["fee"] = "Infinity"
+    elif case == "invalid_asset":
+        records[0][2]["asset"] = "?"
+        records[1][2]["asset"] = "?.F"
+    elif case == "wrong_variant":
+        records[0][2]["asset"] = "ADA.S"
+    else:
+        records[0][2]["refid"] = records[1][2]["refid"] = ""
+    session_id = store_records(factory, records)
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
+    assert result.internal_movements == 0
+    assert result.review_cases == expected_reviews
+    assert all(
+        problem.code == "ledger_transfer_requires_review" for problem in result.problems
+    )
+
+
+def test_spotfromfutures_transfer_remains_review() -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [
+            ledger(
+                "FUTURES",
+                "transfer",
+                "1",
+                asset="ETHW",
+                subtype="spotfromfutures",
+                refid="FUTURES-REF",
+            )
+        ],
+    )
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.internal_movements == 0
+    assert result.review_cases == 1
+    assert result.problems[0].code == "ledger_transfer_requires_review"
+
+
+def test_autoallocation_pair_can_span_target_and_context_sessions() -> None:
+    factory = database_factory()
+    base, funded = autoallocation_pair()
+    target_session = store_records(factory, [base])
+    context_session = store_records(factory, [funded])
+
+    result = transform(
+        factory,
+        target_session,
+        version="kraken-domain-v2",
+        context_session_ids=(context_session,),
+    )
+
+    assert result.checked_records == result.internal_movements == 1
+    assert result.review_cases == result.conflicts == 0
+    with factory() as database:
+        decision = database.scalar(
+            select(TransformationDecision).where(
+                TransformationDecision.transformation_run_id == result.run_id
+            )
+        )
+        assert decision is not None
+        assert decision.reason_code == "ledger_autoallocation_internal_pair"
+
+
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_autoallocation_pairing_is_order_independent_and_idempotent(
+    reverse_order: bool,
+) -> None:
+    factory = database_factory()
+    records = autoallocation_pair()
+    if reverse_order:
+        records.reverse()
+    session_id = store_records(factory, records)
+
+    first = transform(factory, session_id, version="kraken-domain-v2")
+    second = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert first.internal_movements == second.internal_movements == 2
+    assert first.review_cases == second.review_cases == 0
+    with factory() as database:
+        for entity in (
+            AcquisitionLot,
+            DisposalEvent,
+            TradeExecution,
+            FeeEvent,
+            ValuationRequirement,
+        ):
+            assert database.scalar(select(func.count()).select_from(entity)) == 0
 
 
 def test_trade_projection_eur_crypto_fees_and_reconciliation() -> None:

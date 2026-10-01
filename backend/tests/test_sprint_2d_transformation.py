@@ -1683,11 +1683,117 @@ def test_failure_evidence_storage_can_also_be_unavailable() -> None:
 
 
 @pytest.mark.parametrize(
+    ("kind", "asset", "amount", "fee"),
+    [
+        ("deposit", "ZEUR", "400", "0"),
+        ("deposit", "EUR", "400", "0"),
+        ("withdrawal", "ZEUR", "-6000.0000", "0.0900"),
+        ("deposit", "USD", "250", "0"),
+        ("withdrawal", "ZUSD", "-250", "1"),
+    ],
+)
+def test_valid_fiat_funding_is_an_internal_movement(
+    kind: str, asset: str, amount: str, fee: str
+) -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [ledger("FIAT-FUNDING", kind, amount, asset=asset, fee=fee)],
+    )
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED
+    assert result.checked_records == result.internal_movements == 1
+    assert result.review_cases == result.conflicts == 0
+    assert (
+        result.acquisitions
+        == result.disposals
+        == result.trade_executions
+        == result.fee_events
+        == result.valuation_requirements
+        == 0
+    )
+    with factory() as database:
+        decision = database.scalar(select(TransformationDecision))
+        assert decision is not None
+        assert decision.decision_type is DecisionType.INTERNAL_MOVEMENT
+        assert decision.reason_code == "ledger_fiat_funding_movement"
+        assert (
+            database.scalar(select(func.count()).select_from(TransformationIssue)) == 0
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "asset", "amount", "fee", "reason"),
+    [
+        ("deposit", "XXBT", "1", "0", "ledger_deposit_requires_review"),
+        ("withdrawal", "XXBT", "-1", "0", "ledger_withdrawal_requires_review"),
+        ("deposit", "ZEUR", "0", "0", "ledger_deposit_requires_review"),
+        ("deposit", "ZEUR", "-1", "0", "ledger_deposit_requires_review"),
+        ("withdrawal", "ZEUR", "1", "0", "ledger_withdrawal_requires_review"),
+        ("withdrawal", "ZEUR", "0", "0", "ledger_withdrawal_requires_review"),
+        ("deposit", "ZEUR", "1", "-0.01", "ledger_deposit_requires_review"),
+        ("deposit", "ZEUR", "invalid", "0", "ledger_deposit_requires_review"),
+        ("deposit", "ZEUR", "NaN", "0", "ledger_deposit_requires_review"),
+        ("deposit", "ZEUR", "1", "invalid", "ledger_deposit_requires_review"),
+        ("deposit", "ZEUR", "1", "Infinity", "ledger_deposit_requires_review"),
+        ("deposit", "XUNKNOWN", "1", "0", "ledger_deposit_requires_review"),
+        ("deposit", "?", "1", "0", "ledger_deposit_requires_review"),
+    ],
+)
+def test_invalid_or_crypto_funding_remains_review(
+    kind: str, asset: str, amount: str, fee: str, reason: str
+) -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [ledger("FUNDING-REVIEW", kind, amount, asset=asset, fee=fee)],
+    )
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
+    assert result.internal_movements == 0
+    assert result.review_cases == 1
+    assert result.problems[0].code == reason
+
+
+def test_fiat_funding_is_idempotent_and_never_projects_crypto_objects() -> None:
+    factory = database_factory()
+    session_id = store_records(
+        factory,
+        [
+            ledger(
+                "FIAT-WITHDRAWAL",
+                "withdrawal",
+                "-6000.0000",
+                asset="ZEUR",
+                fee="0.0900",
+            )
+        ],
+    )
+
+    first = transform(factory, session_id, version="kraken-domain-v2")
+    second = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert first.internal_movements == second.internal_movements == 1
+    assert first.review_cases == second.review_cases == 0
+    with factory() as database:
+        for entity in (
+            AcquisitionLot,
+            DisposalEvent,
+            TradeExecution,
+            FeeEvent,
+            ValuationRequirement,
+        ):
+            assert database.scalar(select(func.count()).select_from(entity)) == 0
+
+
+@pytest.mark.parametrize(
     ("kind", "reason"),
     [
         ("transfer", "ledger_transfer_requires_review"),
-        ("withdrawal", "ledger_withdrawal_requires_review"),
-        ("deposit", "ledger_deposit_requires_review"),
         ("credit", "ledger_credit_requires_review"),
         ("adjustment", "ledger_adjustment_requires_review"),
         ("dividend", "ledger_dividend_requires_review"),
@@ -1817,7 +1923,7 @@ def test_reused_rewards_and_three_unresolved_movements_require_review() -> None:
         assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
         assert result.checked_records == 6
         assert result.reused_objects == 3
-        assert result.review_cases == len(result.problems) == 3
+        assert result.review_cases == len(result.problems) == 2
         assert (
             result.rewards
             == result.acquisitions
@@ -1825,10 +1931,10 @@ def test_reused_rewards_and_three_unresolved_movements_require_review() -> None:
             == result.trade_executions
             == result.fee_events
             == result.valuation_requirements
-            == result.internal_movements
             == result.conflicts
             == 0
         )
+        assert result.internal_movements == 1
         with factory() as database:
             assert set(database.scalars(select(AcquisitionLot.id))) == original_lots
             assert (
@@ -1837,8 +1943,9 @@ def test_reused_rewards_and_three_unresolved_movements_require_review() -> None:
             )
             run = database.get(TransformationRun, result.run_id)
             assert run is not None
-            assert run.review_cases == 3
-            assert run.created_objects == run.internal_movements == 0
+            assert run.review_cases == 2
+            assert run.created_objects == 0
+            assert run.internal_movements == 1
             decisions = tuple(
                 database.scalars(
                     select(TransformationDecision).where(
@@ -1858,11 +1965,10 @@ def test_reused_rewards_and_three_unresolved_movements_require_review() -> None:
                 for item in decisions
                 if item.decision_type is DecisionType.REVIEW_REQUIRED
             ]
-            assert len(reviews) == 3
+            assert len(reviews) == 2
             assert sorted(item.reason_code for item in reviews) == [
                 "ledger_transfer_requires_review",
                 "ledger_transfer_requires_review",
-                "ledger_withdrawal_requires_review",
             ]
             issues = tuple(
                 database.scalars(
@@ -1871,7 +1977,7 @@ def test_reused_rewards_and_three_unresolved_movements_require_review() -> None:
                     )
                 )
             )
-            assert len(issues) == 3
+            assert len(issues) == 2
             assert {item.raw_import_record_id for item in issues} == {
                 item.raw_import_record_id for item in reviews
             }

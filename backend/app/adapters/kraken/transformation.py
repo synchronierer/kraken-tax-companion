@@ -750,6 +750,27 @@ class KrakenTransformationService:
                 {"raw_id": str(record.id)},
             )
             return
+        if _is_fiat_funding_movement(record, values):
+            counters.internal += 1
+            self._decision(
+                unit,
+                run,
+                record,
+                DecisionType.INTERNAL_MOVEMENT,
+                "ledger_fiat_funding_movement",
+                (
+                    "Kraken fiat deposit/withdrawal is a funding movement and "
+                    "does not itself represent a crypto-asset acquisition or "
+                    "disposal."
+                ),
+            )
+            self._audit(
+                unit,
+                run,
+                "transformation.internal_movement",
+                {"raw_id": str(record.id)},
+            )
+            return
         reward = kind == "earn" and subtype == "reward"
         legacy = kind == "staking" and not subtype
         if reward or legacy:
@@ -1440,6 +1461,24 @@ def _optional_timestamp(value: str) -> datetime | None:
         return _timestamp(value)
     except ValueError:
         return None
+
+
+def _is_fiat_funding_movement(record: RawImportRecord, values: dict[str, str]) -> bool:
+    kind = values.get("type", "").lower()
+    if record.source != "kraken-ledgers" or kind not in {"deposit", "withdrawal"}:
+        return False
+    asset = normalize_kraken_asset(values.get("asset", ""))
+    if (
+        not asset.is_unambiguous
+        or asset.normalized_asset is None
+        or asset.normalized_asset not in FIAT_ASSETS
+    ):
+        return False
+    amount = _optional_finite_decimal(values.get("amount", ""))
+    fee = _optional_finite_decimal(values.get("fee", ""))
+    if amount is None or fee is None or fee < 0:
+        return False
+    return amount > 0 if kind == "deposit" else amount < 0
 
 
 def _canonical_trade_ledger(

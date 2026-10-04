@@ -100,7 +100,7 @@ new working copy using SQLite backup semantics.
 ### 5B.3.7 – ETH2 → ETH Shapella migration
 
 Status: IMPLEMENTED, TESTED, REAL-DATA OFFLINE VALIDATED, COMMITTED, PUSHED,
-NOT DEPLOYED.
+DEPLOYED.
 
 Code commit: `bcde2908ca1235cf73cf016713eb2a3d45a2e993`.
 
@@ -205,6 +205,22 @@ Terminal gate:
 The sandbox terminal result was `HISTORICAL_SANDBOX_COMBINED_PASS`. The listed
 counts are validation evidence, not artificial PASS conditions in the probe.
 
+Deployment validation:
+
+- Backend health after deployment: `HEALTH=healthy`;
+- code deployed from commit
+  `bcde2908ca1235cf73cf016713eb2a3d45a2e993`;
+- PRE backup: `pre-5b3-7-deploy-20261004-195922.db`;
+- POST backup: `post-5b3-7-deploy-20261004-200123.db`;
+- PRE logical SHA256:
+  `c97faf16c110c86bb1d33f59513e6cc50d2325f381e99999107f0a73500ff869`;
+- POST logical SHA256:
+  `c97faf16c110c86bb1d33f59513e6cc50d2325f381e99999107f0a73500ff869`;
+- tables: 36;
+- `LOGICAL_DB_UNCHANGED=true`;
+- no schema change and no new Alembic migration in 5B.3.7;
+- no Historical Import was performed in production.
+
 ## Current sandbox tooling
 
 A temporary offline probe exists at `/tmp/historical_sandbox_probe.py` and is
@@ -220,14 +236,29 @@ artifacts across days or reboots. If the probe becomes operationally important
 long-term, create a sanitized repository-maintained diagnostic tool in a future
 dedicated change rather than silently depending on a temporary file.
 
-## Current next step
+## Sprint 5B.3.8 – Remaining Crypto Deposit Reconciliation
 
-1. Deploy the committed 5B.3.7 code.
-2. During deployment, verify PRE/POST logical SQLite integrity.
-3. Do not perform a Historical Import in production.
-4. Update this file with the deployment status after deployment.
-5. Reconcile the remaining 11 crypto-deposit reviews individually against
-   historical external source evidence.
+The next development step is to examine the 11 remaining
+`ledger_deposit_requires_review` cases individually against reliable historical
+evidence and classify only cases with an unambiguous origin or acquisition
+chain.
+
+Rules:
+
+- do not classify all deposits by default;
+- fail closed when evidence is unclear;
+- keep original imports unchanged;
+- make every rule deterministic and auditable;
+- external historical sources and existing local exports may be used offline;
+- do not put private raw transaction details in repository documentation;
+- do not modify production data during development or reconciliation;
+- production Historical Import remains blocked.
+
+Before implementation, create an offline inventory of the 11 review cases
+covering asset, timestamp, amount, relevant adjacent Ledger/Trade events,
+available external evidence, suspected origin, evidence strength, possible
+classification, and the remaining open question. Private values may be used in
+local diagnostics but must not be committed.
 
 ## Handoff discipline
 

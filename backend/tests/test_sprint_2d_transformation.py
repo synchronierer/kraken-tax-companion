@@ -371,6 +371,288 @@ def test_rewards_internal_movements_and_review_cases() -> None:
         )
 
 
+def shapella_migration_pair(
+    *,
+    prefix: str = "SHAPELLA",
+    amount: str = "1.1070826288",
+    eth2_amount: str | None = None,
+    xeth_amount: str | None = None,
+    eth2_time: str = "2023-04-18 13:30:05.373592+00:00",
+    xeth_time: str = "2023-04-17 14:46:42.745276+00:00",
+    eth2_fee: str = "0",
+    xeth_fee: str = "0",
+) -> list[tuple[str, str, dict[str, str]]]:
+    return [
+        ledger(
+            f"{prefix}-ETH2",
+            "staking",
+            eth2_amount if eth2_amount is not None else f"-{amount}",
+            asset="ETH2",
+            fee=eth2_fee,
+            refid=f"{prefix}-OLD",
+            occurred_at=eth2_time,
+        ),
+        ledger(
+            f"{prefix}-XETH",
+            "staking",
+            xeth_amount if xeth_amount is not None else amount,
+            asset="XETH",
+            fee=xeth_fee,
+            refid=f"{prefix}-NEW",
+            occurred_at=xeth_time,
+        ),
+    ]
+
+
+def api_normalized_shapella_migration_pair() -> list[tuple[str, str, dict[str, str]]]:
+    records = shapella_migration_pair()
+    for _, _, payload in records:
+        payload.update(
+            {
+                "type": "earn",
+                "subtype": "reward",
+                "api_type": "staking",
+                "api_subtype": "",
+            }
+        )
+    return records
+
+
+@pytest.mark.parametrize(
+    ("amount", "eth2_time", "xeth_time", "reverse_order"),
+    [
+        (
+            "1.1070826288",
+            "2023-04-18 13:30:05.373592+00:00",
+            "2023-04-17 14:46:42.745276+00:00",
+            False,
+        ),
+        (
+            "0.0059094115",
+            "2023-04-20 04:45:43.999613+00:00",
+            "2023-04-20 04:54:49.647217+00:00",
+            True,
+        ),
+    ],
+)
+def test_strict_eth2_shapella_migration_pairs_are_internal(
+    amount: str, eth2_time: str, xeth_time: str, reverse_order: bool
+) -> None:
+    factory = database_factory()
+    records = shapella_migration_pair(
+        amount=amount, eth2_time=eth2_time, xeth_time=xeth_time
+    )
+    if reverse_order:
+        records.reverse()
+    session_id = store_records(factory, records)
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED
+    assert result.internal_movements == 2
+    assert result.review_cases == result.conflicts == 0
+    assert result.rewards == 0
+    assert (
+        result.acquisitions
+        == result.disposals
+        == result.trade_executions
+        == result.fee_events
+        == result.valuation_requirements
+        == 0
+    )
+    with factory() as database:
+        decisions = tuple(database.scalars(select(TransformationDecision)))
+        assert len(decisions) == 2
+        assert all(
+            decision.decision_type is DecisionType.INTERNAL_MOVEMENT
+            for decision in decisions
+        )
+        assert {decision.reason_code for decision in decisions} == {
+            "ledger_eth2_to_eth_shapella_migration"
+        }
+        assert (
+            database.scalar(select(func.count()).select_from(TransformationIssue)) == 0
+        )
+
+
+def test_eth2_shapella_pair_can_span_target_and_context_sessions() -> None:
+    factory = database_factory()
+    eth2, xeth = shapella_migration_pair()
+    target_session = store_records(factory, [xeth])
+    context_session = store_records(factory, [eth2])
+
+    result = transform(
+        factory,
+        target_session,
+        version="kraken-domain-v2",
+        context_session_ids=(context_session,),
+    )
+
+    assert result.checked_records == result.internal_movements == 1
+    assert result.rewards == result.acquisitions == result.valuation_requirements == 0
+    assert result.review_cases == result.conflicts == 0
+    with factory() as database:
+        decision = database.scalar(
+            select(TransformationDecision).where(
+                TransformationDecision.transformation_run_id == result.run_id
+            )
+        )
+        assert decision is not None
+        assert decision.reason_code == "ledger_eth2_to_eth_shapella_migration"
+
+
+def test_api_normalized_eth2_shapella_pair_is_internal() -> None:
+    factory = database_factory()
+    session_id = store_records(factory, api_normalized_shapella_migration_pair())
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED
+    assert result.internal_movements == 2
+    assert result.rewards == result.acquisitions == result.valuation_requirements == 0
+    assert result.review_cases == result.conflicts == 0
+
+
+def test_eth2_shapella_migration_is_idempotent_without_domain_projections() -> None:
+    factory = database_factory()
+    session_id = store_records(factory, shapella_migration_pair())
+
+    first = transform(factory, session_id, version="kraken-domain-v2")
+    second = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert first.internal_movements == second.internal_movements == 2
+    assert first.review_cases == second.review_cases == 0
+    assert first.rewards == second.rewards == 0
+    with factory() as database:
+        for entity in (
+            AcquisitionLot,
+            DisposalEvent,
+            TradeExecution,
+            FeeEvent,
+            ValuationRequirement,
+        ):
+            assert database.scalar(select(func.count()).select_from(entity)) == 0
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_leg",
+        "two_eth2",
+        "two_xeth",
+        "different_amount",
+        "zero_amount",
+        "wrong_sign",
+        "invalid_amount",
+        "nan_amount",
+        "infinite_amount",
+        "nonzero_fee",
+        "invalid_fee",
+        "wrong_type",
+        "subtype",
+        "other_eth_asset",
+        "more_than_24_hours",
+        "outside_window",
+        "invalid_timestamp",
+        "three_candidates",
+    ],
+)
+def test_invalid_eth2_shapella_candidates_are_not_auto_classified(case: str) -> None:
+    factory = database_factory()
+    records = shapella_migration_pair()
+    if case == "missing_leg":
+        records.pop()
+    elif case == "two_eth2":
+        records[1][2]["asset"] = "ETH2"
+    elif case == "two_xeth":
+        records[0][2]["asset"] = "XETH"
+    elif case == "different_amount":
+        records[1][2]["amount"] = "1.1070826289"
+    elif case == "zero_amount":
+        records[0][2]["amount"] = records[1][2]["amount"] = "0"
+    elif case == "wrong_sign":
+        records[0][2]["amount"] = "1.1070826288"
+        records[1][2]["amount"] = "-1.1070826288"
+    elif case == "invalid_amount":
+        records[0][2]["amount"] = "invalid"
+    elif case == "nan_amount":
+        records[0][2]["amount"] = "NaN"
+    elif case == "infinite_amount":
+        records[0][2]["amount"] = "Infinity"
+    elif case == "nonzero_fee":
+        records[0][2]["fee"] = "0.0000000001"
+    elif case == "invalid_fee":
+        records[0][2]["fee"] = "invalid"
+    elif case == "wrong_type":
+        records[0][2]["type"] = "earn"
+    elif case == "subtype":
+        records[1][2]["subtype"] = "reward"
+    elif case == "other_eth_asset":
+        records[1][2]["asset"] = "ETH"
+    elif case == "more_than_24_hours":
+        records[1][2]["time"] = "2023-04-17 00:01:00+00:00"
+        records[0][2]["time"] = "2023-04-18 01:02:00+00:00"
+    elif case == "outside_window":
+        records[0][2]["time"] = "2023-04-22 12:00:00+00:00"
+        records[1][2]["time"] = "2023-04-22 12:01:00+00:00"
+    elif case == "invalid_timestamp":
+        records[0][2]["time"] = "invalid"
+    else:
+        records.append(
+            ledger(
+                "SHAPELLA-THIRD",
+                "staking",
+                "1.1070826288",
+                asset="XETH",
+                occurred_at="2023-04-18 13:31:00+00:00",
+            )
+        )
+    session_id = store_records(factory, records)
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
+    assert result.internal_movements == 0
+    with factory() as database:
+        reasons = set(database.scalars(select(TransformationDecision.reason_code)))
+        assert "ledger_eth2_to_eth_shapella_migration" not in reasons
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "api_wrong_type",
+        "api_nonempty_subtype",
+        "api_wrong_normalized_type",
+        "api_wrong_normalized_subtype",
+        "api_only_type",
+    ],
+)
+def test_inconsistent_api_staking_metadata_fails_closed(case: str) -> None:
+    factory = database_factory()
+    records = api_normalized_shapella_migration_pair()
+    for _, _, payload in records:
+        if case == "api_wrong_type":
+            payload["api_type"] = "earn"
+        elif case == "api_nonempty_subtype":
+            payload["api_subtype"] = "reward"
+        elif case == "api_wrong_normalized_type":
+            payload["type"] = "staking"
+        elif case == "api_wrong_normalized_subtype":
+            payload["subtype"] = ""
+        else:
+            del payload["api_subtype"]
+    session_id = store_records(factory, records)
+
+    result = transform(factory, session_id, version="kraken-domain-v2")
+
+    assert result.status is TransformationStatus.COMPLETED_WITH_REVIEW
+    assert result.internal_movements == 0
+    with factory() as database:
+        reasons = set(database.scalars(select(TransformationDecision.reason_code)))
+        assert "ledger_eth2_to_eth_shapella_migration" not in reasons
+
+
 def autoallocation_pair(
     *,
     base_asset: str = "ADA",

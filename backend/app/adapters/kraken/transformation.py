@@ -1,7 +1,7 @@
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
@@ -83,6 +83,9 @@ PROVIDER = "kraken"
 ACCOUNT_SCOPE = "default"
 WALLET_SCOPE = "kraken-spot"
 COST_TOLERANCE = Decimal("0.01")
+ETH2_SHAPELLA_MIGRATION_WINDOW_START = datetime(2023, 4, 17, tzinfo=UTC)
+ETH2_SHAPELLA_MIGRATION_WINDOW_END = datetime(2023, 4, 21, tzinfo=UTC)
+ETH2_SHAPELLA_MIGRATION_MAX_DISTANCE = timedelta(hours=24)
 
 
 class TransformationProblemKind(StrEnum):
@@ -147,6 +150,15 @@ class _AutoallocationCandidate:
     occurred_at: datetime | None
     product_variant: str | None
     amount: Decimal | None
+    fee: Decimal | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Eth2ShapellaMigrationCandidate:
+    record_id: UUID
+    raw_asset: str
+    occurred_at: datetime | None
+    amount: Decimal
     fee: Decimal | None
 
 
@@ -225,6 +237,9 @@ class KrakenTransformationService:
                 internal_autoallocation_records = _internal_autoallocation_record_ids(
                     all_records
                 )
+                eth2_shapella_migration_records = _eth2_shapella_migration_record_ids(
+                    all_records
+                )
                 grouped_ids = {
                     record.id
                     for group in ledger_groups.values()
@@ -245,6 +260,7 @@ class KrakenTransformationService:
                             problems,
                             reconciled_trade_ledgers,
                             internal_autoallocation_records,
+                            eth2_shapella_migration_records,
                         )
                     elif record.source == "kraken-trades":
                         self._transform_trade(unit, run, record, counters, problems)
@@ -696,10 +712,32 @@ class KrakenTransformationService:
         problems: list[TransformationProblem],
         reconciled_trade_ledgers: frozenset[UUID],
         internal_autoallocation_records: frozenset[UUID],
+        eth2_shapella_migration_records: frozenset[UUID],
     ) -> None:
         values = _values(record)
         kind = values.get("type", "").lower()
         subtype = values.get("subtype", "").lower()
+        if record.id in eth2_shapella_migration_records:
+            counters.internal += 1
+            self._decision(
+                unit,
+                run,
+                record,
+                DecisionType.INTERNAL_MOVEMENT,
+                "ledger_eth2_to_eth_shapella_migration",
+                (
+                    "An exactly balanced historical Kraken ETH2/XETH staking "
+                    "pair within the Shapella migration window is an internal "
+                    "ETH2-to-ETH movement."
+                ),
+            )
+            self._audit(
+                unit,
+                run,
+                "transformation.internal_movement",
+                {"raw_id": str(record.id)},
+            )
+            return
         if record.id in internal_autoallocation_records:
             counters.internal += 1
             self._decision(
@@ -1465,6 +1503,87 @@ def _internal_autoallocation_record_ids(
         ):
             continue
         internal.update((first.record_id, second.record_id))
+    return frozenset(internal)
+
+
+def _eth2_shapella_migration_record_ids(
+    records: Sequence[RawImportRecord],
+) -> frozenset[UUID]:
+    groups: defaultdict[Decimal, list[_Eth2ShapellaMigrationCandidate]] = defaultdict(
+        list
+    )
+    for record in records:
+        values = _values(record)
+        raw_asset = values.get("asset", "")
+        if record.source != "kraken-ledgers" or raw_asset not in {"ETH2", "XETH"}:
+            continue
+        has_api_metadata = "api_type" in values or "api_subtype" in values
+        if has_api_metadata:
+            if (
+                "api_type" not in values
+                or "api_subtype" not in values
+                or values["api_type"].lower() != "staking"
+                or values["api_subtype"].strip()
+                or values.get("type", "").lower() != "earn"
+                or values.get("subtype", "").lower() != "reward"
+            ):
+                continue
+        elif (
+            values.get("type", "").lower() != "staking"
+            or values.get("subtype", "").strip()
+        ):
+            continue
+        asset = normalize_kraken_asset(raw_asset)
+        amount = _optional_finite_decimal(values.get("amount", ""))
+        if (
+            not asset.is_unambiguous
+            or asset.normalized_asset != "ETH"
+            or amount is None
+        ):
+            continue
+        groups[amount.copy_abs()].append(
+            _Eth2ShapellaMigrationCandidate(
+                record_id=record.id,
+                raw_asset=raw_asset,
+                occurred_at=_optional_timestamp(values.get("time", "")),
+                amount=amount,
+                fee=_optional_finite_decimal(values.get("fee", "")),
+            )
+        )
+
+    internal: set[UUID] = set()
+    for candidates in groups.values():
+        if len(candidates) != 2:
+            continue
+        eth2_candidates = [item for item in candidates if item.raw_asset == "ETH2"]
+        xeth_candidates = [item for item in candidates if item.raw_asset == "XETH"]
+        if len(eth2_candidates) != 1 or len(xeth_candidates) != 1:
+            continue
+        eth2 = eth2_candidates[0]
+        xeth = xeth_candidates[0]
+        if (
+            eth2.amount >= 0
+            or xeth.amount <= 0
+            or eth2.amount.copy_abs() != xeth.amount
+            or eth2.fee != 0
+            or xeth.fee != 0
+            or eth2.occurred_at is None
+            or xeth.occurred_at is None
+            or not (
+                ETH2_SHAPELLA_MIGRATION_WINDOW_START
+                <= eth2.occurred_at
+                < ETH2_SHAPELLA_MIGRATION_WINDOW_END
+            )
+            or not (
+                ETH2_SHAPELLA_MIGRATION_WINDOW_START
+                <= xeth.occurred_at
+                < ETH2_SHAPELLA_MIGRATION_WINDOW_END
+            )
+            or abs(eth2.occurred_at - xeth.occurred_at)
+            > ETH2_SHAPELLA_MIGRATION_MAX_DISTANCE
+        ):
+            continue
+        internal.update((eth2.record_id, xeth.record_id))
     return frozenset(internal)
 
 

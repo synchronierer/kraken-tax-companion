@@ -238,27 +238,62 @@ dedicated change rather than silently depending on a temporary file.
 
 ## Sprint 5B.3.8 – Remaining Crypto Deposit Reconciliation
 
-The next development step is to examine the 11 remaining
-`ledger_deposit_requires_review` cases individually against reliable historical
-evidence and classify only cases with an unambiguous origin or acquisition
-chain.
+The offline inventory identified exactly 11 distinct
+`ledger_deposit_requires_review` cases. The 22 issue rows in the sandbox are
+duplicates from two idempotent transformation runs and represent 11 business
+cases.
 
-Rules:
+Asset distribution:
 
-- do not classify all deposits by default;
-- fail closed when evidence is unclear;
-- keep original imports unchanged;
-- make every rule deterministic and auditable;
-- external historical sources and existing local exports may be used offline;
-- do not put private raw transaction details in repository documentation;
-- do not modify production data during development or reconciliation;
-- production Historical Import remains blocked.
+- BTC: 4;
+- BCH: 2;
+- DOGE: 2;
+- LTC: 2;
+- ETH: 1.
 
-Before implementation, create an offline inventory of the 11 review cases
-covering asset, timestamp, amount, relevant adjacent Ledger/Trade events,
-available external evidence, suspected origin, evidence strength, possible
-classification, and the remaining open question. Private values may be used in
-local diagnostics but must not be committed.
+Evidence grouping:
+
+- Group A (reliably reconstructable): 0;
+- Group B (probably reconstructable): 4 (cases 1, 8, 10, and 11);
+- Group C (currently not reconstructable): 7 (cases 2, 3, 4, 5, 6, 7, and 9).
+
+A second offline evidence review of Group B found no case that can be promoted
+to Group A. Cases 1, 8, 10, and 11 therefore remain open and must remain
+`ledger_deposit_requires_review`.
+
+For BTC cases 8, 10, and 11, the deposits are independent records with
+different Ledger and reference identifiers. Each is followed by an exact
+`transfer/spottostaking` amount. This proves only an internal movement after
+the deposit; it does not prove origin, acquisition date, or acquisition cost.
+Case 1 also has an unexplained amount difference of `0.0000057268 ETH` between
+the deposit and the later staking movement. No direct trade link, reliable
+trade-volume match, external withdrawal, wallet transaction, or purchase
+record was found in the examined local sources.
+
+Conclusion:
+
+- no generic deposit-classification rule is justified;
+- all 11 cases remain fail-closed as `ledger_deposit_requires_review`;
+- no productive Historical Import is permitted;
+- live sale/trading simulation remains blocked by incomplete historical cost
+  basis;
+- no TaxCalculationRun, review decision, or production mutation was made.
+
+The next action is Evidence Acquisition, not implementation. Prioritize, in
+order:
+
+1. historical exports from other exchanges or brokers;
+2. wallet histories and wallet backups;
+3. purchase confirmations or settlement statements;
+4. historical emails for purchases, transfers, or withdrawals;
+5. bank, card, or payment records;
+6. blockchain transaction IDs or wallet addresses that establish an auditable
+   transfer chain.
+
+Only after a complete and auditable chain exists for at least one case should
+the project decide whether a deterministic transformation rule, a narrowly
+scoped historical special case, or an explicit human review decision is
+appropriate. No such evidence is currently available.
 
 ## Handoff discipline
 

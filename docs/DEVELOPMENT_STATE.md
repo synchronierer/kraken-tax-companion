@@ -9,10 +9,12 @@
 
 - Repository: `synchronierer/kraken-tax-companion`
 - Main branch: `main`
-- Current HEAD: `bcde290` (`fix: classify Kraken ETH2 Shapella migration`)
-- Full code-commit SHA: `bcde290e27b5dd8a2629403e7ed29f6478b5f749`
-- HEAD is one local commit ahead of `origin/main`; no push has been performed.
-- Working tree changes are limited to the two pending handoff documents.
+- At every session start, determine the live Git state with
+  `git status --short`, `git rev-parse HEAD`, and `git log -5 --oneline`.
+- When needed, run `git fetch` and compare the local branch with
+  `origin/main`.
+- This file records stable development milestones, not permanently asserted
+  volatile Git state.
 
 ## Product / architecture snapshot
 
@@ -97,10 +99,10 @@ new working copy using SQLite backup semantics.
 
 ### 5B.3.7 – ETH2 → ETH Shapella migration
 
-Status: IMPLEMENTED, TESTED, REAL-DATA OFFLINE VALIDATED, COMMITTED, NOT
-DEPLOYED.
+Status: IMPLEMENTED, TESTED, REAL-DATA OFFLINE VALIDATED, COMMITTED, PUSHED,
+NOT DEPLOYED.
 
-Code commit: `bcde290e27b5dd8a2629403e7ed29f6478b5f749`.
+Code commit: `bcde2908ca1235cf73cf016713eb2a3d45a2e993`.
 
 Implementation intent:
 
@@ -196,7 +198,7 @@ AcquisitionLots, DisposalEvents, FeeEvents, TradeExecutions, or
 ValuationRequirements. Ledger reused 2169 objects and Trade reused 39 objects.
 `domain_counts_unchanged=true` and `unexpected_domain_duplicates=false`.
 
-Expected terminal gate:
+Terminal gate:
 
 `HISTORICAL_SANDBOX_COMBINED_PASS`
 
@@ -220,13 +222,12 @@ dedicated change rather than silently depending on a temporary file.
 
 ## Current next step
 
-1. Do not deploy 5B.3.7 yet.
-2. Do not perform the historical production backfill yet.
-3. Do not start a TaxCalculationRun or make review decisions automatically.
-4. Reconcile the remaining 11 crypto-deposit reviews individually against
+1. Deploy the committed 5B.3.7 code.
+2. During deployment, verify PRE/POST logical SQLite integrity.
+3. Do not perform a Historical Import in production.
+4. Update this file with the deployment status after deployment.
+5. Reconcile the remaining 11 crypto-deposit reviews individually against
    historical external source evidence.
-5. Before any future production mutation, perform explicit authorization and
-   the normal pre/post logical database-integrity procedure.
 
 ## Handoff discipline
 

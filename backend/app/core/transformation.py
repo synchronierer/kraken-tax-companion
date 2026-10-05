@@ -1,5 +1,6 @@
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
@@ -198,6 +199,39 @@ class TransformationIssue:
         object.__setattr__(self, "code", required_text(self.code, "code"))
         object.__setattr__(self, "message", required_text(self.message, "message"))
         object.__setattr__(self, "occurred_at", require_utc(self.occurred_at))
+
+
+def active_transformation_issues(
+    issues: Iterable[TransformationIssue],
+    runs: Mapping[UUID, TransformationRun],
+) -> tuple[TransformationIssue, ...]:
+    """Project run-scoped issues onto stable active review identities.
+
+    Transformation issues remain append-only run history.  This projection
+    selects one deterministic representative for each raw-record/code pair;
+    callers still decide whether a raw record is resolved.
+    """
+    representatives: dict[tuple[UUID, str], TransformationIssue] = {}
+
+    def rank(issue: TransformationIssue) -> tuple[datetime, datetime, str]:
+        run = runs.get(issue.transformation_run_id)
+        run_started_at = (
+            run.started_at if run is not None else datetime.min.replace(tzinfo=UTC)
+        )
+        return run_started_at, issue.occurred_at, str(issue.id)
+
+    for issue in issues:
+        key = (issue.raw_import_record_id, issue.code)
+        current = representatives.get(key)
+        if current is None or rank(issue) > rank(current):
+            representatives[key] = issue
+    return tuple(
+        sorted(
+            representatives.values(),
+            key=lambda issue: (issue.occurred_at, str(issue.id)),
+            reverse=True,
+        )
+    )
 
 
 @dataclass(kw_only=True)

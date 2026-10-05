@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -422,6 +422,99 @@ def test_current_suggestions_are_explainable_and_not_resolutions(
         "LAUUY4P-PMRFB-CCRQHC",
         "LAL7WE7-5XLGW-FCIW3C",
     }
+
+
+def test_active_review_projection_deduplicates_repeated_transformation_run(
+    review_client: TestClient, review_database: Session
+) -> None:
+    run = TransformationRun(
+        contract_version="kraken-domain-v2",
+        status=TransformationStatus.COMPLETED_WITH_REVIEW,
+        started_at=NOW + timedelta(minutes=1),
+        completed_at=NOW + timedelta(minutes=1),
+        actor_id="test-suite",
+        checked_records=1,
+        review_cases=1,
+    )
+    review_database.add(run)
+    review_database.add(
+        TransformationIssue(
+            transformation_run_id=run.id,
+            raw_import_record_id=EUR_ID,
+            code="ledger_withdrawal_requires_review",
+            message="Financial record requires review.",
+            is_conflict=False,
+            occurred_at=NOW + timedelta(minutes=1),
+        )
+    )
+    review_database.commit()
+
+    assert review_client.get("/api/reviews").json()["total"] == 3
+    assert review_client.get("/api/financial-reviews").json()["total"] == 3
+    assert review_client.get("/api/dashboard").json()["review_cases"] == 3
+
+    review_client.post("/api/financial-review-suggestions")
+    suggestions = list(review_database.scalars(select(FinancialReviewSuggestion)))
+    assert len(suggestions) == 2
+
+
+def test_resolution_closes_all_historical_issue_representatives(
+    review_client: TestClient, review_database: Session
+) -> None:
+    run = TransformationRun(
+        contract_version="kraken-domain-v2",
+        status=TransformationStatus.COMPLETED_WITH_REVIEW,
+        started_at=NOW + timedelta(minutes=1),
+        completed_at=NOW + timedelta(minutes=1),
+        actor_id="test-suite",
+        checked_records=1,
+        review_cases=1,
+    )
+    duplicate = TransformationIssue(
+        transformation_run_id=run.id,
+        raw_import_record_id=EUR_ID,
+        code="ledger_withdrawal_requires_review",
+        message="Financial record requires review.",
+        is_conflict=False,
+        occurred_at=NOW + timedelta(minutes=1),
+    )
+    review_database.add_all((run, duplicate))
+    review_database.commit()
+    historical_ids = {
+        item.id
+        for item in review_database.scalars(
+            select(TransformationIssue).where(
+                TransformationIssue.raw_import_record_id == EUR_ID
+            )
+        )
+    }
+
+    review_client.post("/api/financial-review-suggestions")
+    url = f"/api/reviews/{issue_id(review_database, EUR_ID)}/resolve"
+    payload = decision_payload("confirmed", "own_account_fiat_withdrawal", [EUR_ID])
+    assert review_client.post(url, json=payload).status_code == 200
+    assert review_client.get("/api/reviews").json()["total"] == 2
+    assert (
+        review_database.scalar(
+            select(func.count())
+            .select_from(TransformationIssue)
+            .where(TransformationIssue.raw_import_record_id == EUR_ID)
+        )
+        == 2
+    )
+    assert historical_ids == {
+        item.id
+        for item in review_database.scalars(
+            select(TransformationIssue).where(
+                TransformationIssue.raw_import_record_id == EUR_ID
+            )
+        )
+    }
+    assert review_client.post(url, json=payload).json()["duplicate"] is True
+    second_id = next(
+        item for item in historical_ids if str(item) != url.rsplit("/", 2)[1]
+    )
+    assert review_client.get(f"/api/reviews/{second_id}").status_code == 200
 
 
 def test_confirm_withdrawal_is_idempotent_and_has_no_crypto_disposal(

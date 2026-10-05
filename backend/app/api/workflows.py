@@ -30,11 +30,13 @@ from app.core.transformation import (
     FeeEvent,
     TradeExecution,
     TransformationDecision,
+    TransformationIssue,
     TransformationRun,
     TransformationRunSession,
     TransformationStatus,
     ValuationMethod,
     ValuationRequirement,
+    active_transformation_issues,
 )
 from app.core.valuation import (
     METHOD_VERSION,
@@ -1827,13 +1829,16 @@ def valuation_detail(item_id: UUID, db: Db) -> dict[str, Any]:
 def reviews(db: Db, offset: Offset = 0, limit: Limit = 100) -> dict[str, Any]:
     from app.core.entities import AuditEvent
     from app.core.financial_review import FinancialReviewRecordLink
-    from app.core.transformation import TransformationIssue
 
     resolved_raw_ids = {
         link.raw_import_record_id
         for link in list_entities(db, FinancialReviewRecordLink)
         if link.resolution_id is not None
     }
+    active_issues = active_transformation_issues(
+        list_entities(db, TransformationIssue),
+        {run.id: run for run in list_entities(db, TransformationRun)},
+    )
     rows = [
         {
             "id": str(x.id),
@@ -1842,7 +1847,7 @@ def reviews(db: Db, offset: Offset = 0, limit: Limit = 100) -> dict[str, Any]:
             "kind": "transformation",
             "occurred_at": x.occurred_at,
         }
-        for x in list_entities(db, TransformationIssue)
+        for x in active_issues
         if x.raw_import_record_id not in resolved_raw_ids
     ]
     rows += [

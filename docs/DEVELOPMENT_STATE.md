@@ -267,12 +267,19 @@ Validation completed:
 - backend coverage: 100%;
 - Ruff: PASS;
 - Black: PASS;
-- Mypy is a known baseline/technical-debt exception, not a passing gate:
-  canonical command `mypy backend/app` reports 12 existing errors at B.1
-  commit `67bee35132ebaf361616f2c1291934877afc9fc1`; the current B.2 working
-  tree reports the byte-identical 12 errors, exclusively in
-  `app/api/tax.py` and `app/api/workflows.py`. B.2 changes neither file and
-  introduces no new Mypy errors;
+- Mypy results are environment-specific. In the earlier local preflight
+  virtualenv, canonical command `mypy backend/app` reported 12 baseline
+  errors at B.1 commit `67bee35132ebaf361616f2c1291934877afc9fc1`, exclusively
+  in `app/api/tax.py` and `app/api/workflows.py`; the recorded output was
+  byte-identical for the B.2 working tree. In the reproducible project test
+  container, Python 3.12.10 with Mypy 1.20.2, the same command reports
+  `Success: no issues found` for both the B.1 reference and the current tree.
+  The repository configuration is unchanged (`python_version = "3.12"`,
+  strict mode, Pydantic plugin). The earlier virtualenv package/toolchain
+  state is not reproducible from the current container, so the 12-error result
+  remains documented as local baseline technical debt rather than a universal
+  project result. 5B.3.9B changes neither `app/api/tax.py` nor the underlying
+  tax typing and introduces no new Mypy errors in either compared run.
 - no provider access, production database access, TaxCalculationRun,
   review decision, order, or Historical Import was performed.
 
@@ -303,19 +310,53 @@ ValuationRequirements 2759. Ledger/trade reconciliation was 39/39 matched;
 the ledger pass reported three remaining deposit reviews and zero conflicts.
 
 Focused B.2 tests: 18 passed. The full backend suite ran 663 tests successfully
-in the offline container with 100% coverage. Ruff and Black pass. Mypy reports
-the same pre-existing errors in
-`app/api/tax.py` and `app/api/workflows.py`; B.2 introduces no new mypy error.
+in the offline container with 100% coverage. Ruff and Black pass. Mypy has the
+environment-specific baseline described above; B.2 introduces no new error in
+either the earlier local baseline output or the current test-container run.
 
 No provider access, production database access, TaxCalculationRun,
 automatic review decision, order, or production Historical Import was
 performed.
 
+## Sprint 5B.3.9 – Active review projection
+
+The initial 5B.3.9 pre-production dry-run correctly kept domain projections
+idempotent, but exposed an active-review projection defect: three unresolved
+deposit facts were persisted once per transformation run and therefore
+appeared as six active review rows. `TransformationIssue` and
+`TransformationDecision` remain intentionally run-scoped append-only history;
+their historical rows are not deduplicated or deleted.
+
+5B.3.9B adds a shared deterministic active-review projection keyed by
+`raw_import_record_id + issue.code`. It selects the newest transformation run,
+then `occurred_at`, then the stable issue ID. The projection is used by the
+review API, financial-review API, dashboard counts, and suggestion generation.
+Historical detail and run history remain available. Confirmed financial
+review resolutions continue to apply by RawImportRecord identity.
+
+Regression coverage verifies two runs/two issues produce one active case,
+three records across two runs produce three active cases, deterministic
+representative selection, API/dashboard projection, suggestion behavior,
+resolution of all historical representatives, and separation of issue codes.
+
+A fresh pre-production dry-run was performed from a SQLite-backup copy of the
+current production baseline. Migration `0012 -> 0013` succeeded. The first
+pass produced AcquisitionLots 2711, DisposalEvents 13, FeeEvents 49,
+TradeExecutions 39, and ValuationRequirements 2759. The second identical pass
+left all domain counts unchanged. Six persisted
+`ledger_deposit_requires_review` history rows (three facts in two runs) project
+to three active deposit reviews; the two historical cost-basis gaps remain two
+active gaps. Historical transfer links/resolutions remain 8/8 (6 resolved,
+2 partial). No production database was mutated.
+
+Active review cases are fachlich idempotent; historical run issues remain
+append-only. No production migration, Historical Import, TaxCalculationRun,
+automatic review decision, provider access, or order was performed.
+
 ## Current next step
 
-B.2 is committed for review. No production migration or Historical Import is
-authorized by this phase; production deployment remains a separate explicit
-step.
+5B.3.9B is implemented and validated offline. Review the diff before any
+commit, deployment, production migration, or production Historical Import.
 
 ## Handoff discipline
 

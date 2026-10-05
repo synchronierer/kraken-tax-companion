@@ -5,17 +5,21 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.selectable import FromClause
 
 from app.core.entities import ImportSession
+from app.core.financial_review import FinancialReviewRecordLink
+from app.core.transformation import (
+    TransformationIssue,
+    TransformationRun,
+    active_transformation_issues,
+)
 from app.core.valuation import ValuationDecisionStatus, ValuationRun
 from app.database.mappings import (
     acquisition_lots,
     audit_events,
     disposal_events,
-    financial_review_record_links,
     import_sessions,
     raw_import_records,
     tax_review_cases,
     trade_executions,
-    transformation_issues,
     transformation_runs,
     valuation_decisions,
     valuation_requirements,
@@ -48,20 +52,18 @@ class SqlAlchemyDashboardQueries:
                 successor.c.supersedes_id == valuation_decisions.c.id
             )
         )
-        resolved_financial_issue = exists(
-            select(financial_review_record_links.c.id).where(
-                financial_review_record_links.c.raw_import_record_id
-                == transformation_issues.c.raw_import_record_id,
-                financial_review_record_links.c.resolution_id.is_not(None),
-            )
+        active_issues = active_transformation_issues(
+            self._session.scalars(select(TransformationIssue)),
+            {run.id: run for run in self._session.scalars(select(TransformationRun))},
         )
-        open_transformation_issues = int(
-            self._session.scalar(
-                select(func.count())
-                .select_from(transformation_issues)
-                .where(~resolved_financial_issue)
-            )
-            or 0
+        resolved_raw_ids = {
+            link.raw_import_record_id
+            for link in self._session.scalars(select(FinancialReviewRecordLink))
+            if link.resolution_id is not None
+        }
+        open_transformation_issues = sum(
+            issue.raw_import_record_id not in resolved_raw_ids
+            for issue in active_issues
         )
         return DashboardCounts(
             imports=self._count(import_sessions),

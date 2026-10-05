@@ -17,7 +17,12 @@ from app.core.financial_review import (
     SuggestionStatus,
 )
 from app.core.time import utc_now
-from app.core.transformation import DomainProvenance, TransformationIssue
+from app.core.transformation import (
+    DomainProvenance,
+    TransformationIssue,
+    TransformationRun,
+    active_transformation_issues,
+)
 from app.database.mappings import (
     financial_review_record_links as financial_review_record_links_table,
 )
@@ -95,6 +100,12 @@ def _linked_records(
     return result
 
 
+def _active_issues(db: Session) -> tuple[TransformationIssue, ...]:
+    issues = list(db.scalars(select(TransformationIssue)))
+    runs = {run.id: run for run in db.scalars(select(TransformationRun))}
+    return active_transformation_issues(issues, runs)
+
+
 def _resolution_row(db: Session, item: FinancialReviewResolution) -> dict[str, Any]:
     return {
         "id": str(item.id),
@@ -137,7 +148,7 @@ def _suggestion_row(db: Session, item: FinancialReviewSuggestion) -> dict[str, A
 @router.post("/financial-review-suggestions")
 def generate_suggestions(db: Db) -> dict[str, Any]:
     now = utc_now()
-    issues = list(db.scalars(select(TransformationIssue)))
+    issues = list(_active_issues(db))
     issue_by_raw = {item.raw_import_record_id: item for item in issues}
     records = list(db.scalars(select(RawImportRecord)))
     trade_records = {
@@ -221,7 +232,7 @@ def records_by_id(records: list[RawImportRecord]) -> dict[UUID, RawImportRecord]
 
 @router.get("/financial-reviews")
 def financial_reviews(db: Db) -> dict[str, Any]:
-    issues = list(db.scalars(select(TransformationIssue)))
+    issues = list(_active_issues(db))
     suggestions = list(db.scalars(select(FinancialReviewSuggestion)))
     resolutions = list(db.scalars(select(FinancialReviewResolution)))
     resolution_by_raw = {

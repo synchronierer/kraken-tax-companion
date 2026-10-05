@@ -236,64 +236,48 @@ artifacts across days or reboots. If the probe becomes operationally important
 long-term, create a sanitized repository-maintained diagnostic tool in a future
 dedicated change rather than silently depending on a temporary file.
 
-## Sprint 5B.3.8 – Remaining Crypto Deposit Reconciliation
+## Sprint 5B.3.8 Phase B.1 – Historical transfer evidence
 
-The offline inventory identified exactly 11 distinct
-`ledger_deposit_requires_review` cases. The 22 issue rows in the sandbox are
-duplicates from two idempotent transformation runs and represent 11 business
-cases.
+Status: IMPLEMENTED LOCALLY, TESTED, NOT COMMITTED, NOT DEPLOYED, NOT USED FOR
+PRODUCTION DATA.
 
-Asset distribution:
+B.1 adds the smallest persistent, auditable evidence model:
 
-- BTC: 4;
-- BCH: 2;
-- DOGE: 2;
-- LTC: 2;
-- ETH: 1.
+- `HistoricalTransferLink` records versioned source records, target identity,
+  canonical asset, exact quantities, transfer nature, basis coverage, direct
+  fees, transport differences, and evidence/resolution hashes;
+- `HistoricalTransferResolution` records the auditable resolution status and
+  evidence level;
+- migration `0013_historical_transfer_evidence` creates both tables and has not
+  been run against production.
 
-Evidence grouping:
+The offline source adapters import Bitcoin.de Account Statement and Bittrex
+OrderHistory as deterministic `RawImportRecord` batches. Unknown source types,
+missing dates, missing costs, invalid decimals, and ambiguous assets fail closed.
+Complete evidence can project an original-date `AcquisitionLot` and directly
+evidenced `FeeEvent` with provenance to the external raw record. Incomplete
+basis produces `historical_cost_basis_gap`; no zero-cost or Kraken-deposit-date
+lot is created. Transfer nature and cost-basis coverage remain separate
+dimensions, and stable keys make repeated imports/resolutions idempotent.
 
-- Group A (reliably reconstructable): 0;
-- Group B (probably reconstructable): 4 (cases 1, 8, 10, and 11);
-- Group C (currently not reconstructable): 7 (cases 2, 3, 4, 5, 6, 7, and 9).
+Validation completed:
 
-A second offline evidence review of Group B found no case that can be promoted
-to Group A. Cases 1, 8, 10, and 11 therefore remain open and must remain
-`ledger_deposit_requires_review`.
+- focused B.1 tests: 12 passed;
+- full backend suite: 657 passed;
+- backend coverage: 100%;
+- Ruff: PASS;
+- Black: PASS;
+- mypy: PASS;
+- no provider access, production database access, TaxCalculationRun,
+  review decision, order, or Historical Import was performed.
 
-For BTC cases 8, 10, and 11, the deposits are independent records with
-different Ledger and reference identifiers. Each is followed by an exact
-`transfer/spottostaking` amount. This proves only an internal movement after
-the deposit; it does not prove origin, acquisition date, or acquisition cost.
-Case 1 also has an unexplained amount difference of `0.0000057268 ETH` between
-the deposit and the later staking movement. No direct trade link, reliable
-trade-volume match, external withdrawal, wallet transaction, or purchase
-record was found in the examined local sources.
+## Current next step
 
-Conclusion:
-
-- no generic deposit-classification rule is justified;
-- all 11 cases remain fail-closed as `ledger_deposit_requires_review`;
-- no productive Historical Import is permitted;
-- live sale/trading simulation remains blocked by incomplete historical cost
-  basis;
-- no TaxCalculationRun, review decision, or production mutation was made.
-
-The next action is Evidence Acquisition, not implementation. Prioritize, in
-order:
-
-1. historical exports from other exchanges or brokers;
-2. wallet histories and wallet backups;
-3. purchase confirmations or settlement statements;
-4. historical emails for purchases, transfers, or withdrawals;
-5. bank, card, or payment records;
-6. blockchain transaction IDs or wallet addresses that establish an auditable
-   transfer chain.
-
-Only after a complete and auditable chain exists for at least one case should
-the project decide whether a deterministic transformation rule, a narrowly
-scoped historical special case, or an explicit human review decision is
-appropriate. No such evidence is currently available.
+Review B.1 before starting Phase B.2. The next implementation phase may build a
+deterministic resolver for the remaining Kraken deposit reviews only after
+offline evidence is explicitly mapped to these links. It must remain fail
+closed, preserve original imports, and never mutate production during analysis.
+No automatic resolution of the real deposit cases is part of B.1.
 
 ## Handoff discipline
 

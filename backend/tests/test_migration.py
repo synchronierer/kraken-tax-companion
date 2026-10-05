@@ -92,6 +92,8 @@ def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> No
         "financial_review_suggestions",
         "financial_review_resolutions",
         "financial_review_record_links",
+        "historical_transfer_links",
+        "historical_transfer_resolutions",
     }
     assert {"import_hash", "error_summary"}.issubset(
         {column["name"] for column in inspector.get_columns("import_sessions")}

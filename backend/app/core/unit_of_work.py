@@ -8,6 +8,8 @@ from app.core.repositories import (
     DomainProvenanceRepository,
     EarnLotRepository,
     FeeEventRepository,
+    HistoricalTransferLinkRepository,
+    HistoricalTransferResolutionRepository,
     ImportErrorRepository,
     ImportSessionRepository,
     RawImportRepository,
@@ -40,6 +42,8 @@ class UnitOfWork(Protocol):
     fee_events: FeeEventRepository
     domain_provenance: DomainProvenanceRepository
     valuation_requirements: ValuationRequirementRepository
+    historical_transfer_links: HistoricalTransferLinkRepository
+    historical_transfer_resolutions: HistoricalTransferResolutionRepository
 
     def __enter__(self) -> Self: ...
 

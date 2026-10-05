@@ -31,7 +31,7 @@ class ComparisonContext:
 
 def test_metadata_contains_domain_tables() -> None:
     models.configure_mappings()
-    assert len(Base.metadata.tables) == 35
+    assert len(Base.metadata.tables) == 37
     assert "tax_review_decisions" in Base.metadata.tables
     assert "kraken_sync_runs" in Base.metadata.tables
     assert "financial_review_resolutions" in Base.metadata.tables

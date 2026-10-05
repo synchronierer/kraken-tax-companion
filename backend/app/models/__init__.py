@@ -17,6 +17,13 @@ from app.core.financial_review import (
     FinancialReviewResolution,
     FinancialReviewSuggestion,
 )
+from app.core.historical_transfer import (
+    HistoricalBasisCoverage,
+    HistoricalResolutionStatus,
+    HistoricalTransferLink,
+    HistoricalTransferNature,
+    HistoricalTransferResolution,
+)
 from app.core.incremental_sync import IncrementalSyncRun, SyncStatus
 from app.core.tax import (
     DisposalCalculation,
@@ -57,6 +64,11 @@ __all__ = [
     "FinancialReviewRecordLink",
     "FinancialReviewResolution",
     "FinancialReviewSuggestion",
+    "HistoricalBasisCoverage",
+    "HistoricalResolutionStatus",
+    "HistoricalTransferLink",
+    "HistoricalTransferNature",
+    "HistoricalTransferResolution",
     "ImportError",
     "ImportSession",
     "ImportStatus",

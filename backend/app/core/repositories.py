@@ -10,6 +10,10 @@ from app.core.entities import (
     RawImportRecord,
     Sale,
 )
+from app.core.historical_transfer import (
+    HistoricalTransferLink,
+    HistoricalTransferResolution,
+)
 from app.core.transformation import (
     AcquisitionLot,
     DisposalEvent,
@@ -119,4 +123,16 @@ class DomainProvenanceRepository(Repository[DomainProvenance], Protocol):
 
 
 class ValuationRequirementRepository(Repository[ValuationRequirement], Protocol):
+    pass
+
+
+class HistoricalTransferLinkRepository(
+    StableProjectionRepository[HistoricalTransferLink], Protocol
+):
+    pass
+
+
+class HistoricalTransferResolutionRepository(
+    StableProjectionRepository[HistoricalTransferResolution], Protocol
+):
     pass

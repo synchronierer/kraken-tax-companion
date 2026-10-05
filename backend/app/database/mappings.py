@@ -43,6 +43,13 @@ from app.core.financial_review import (
     SuggestionStatus,
     TaxMappingStatus,
 )
+from app.core.historical_transfer import (
+    HistoricalBasisCoverage,
+    HistoricalResolutionStatus,
+    HistoricalTransferLink,
+    HistoricalTransferNature,
+    HistoricalTransferResolution,
+)
 from app.core.incremental_sync import IncrementalSyncRun, SyncStatus
 from app.core.tax import (
     DisposalCalculation,
@@ -410,6 +417,87 @@ transformation_issues = Table(
     Column("message", String(1024), nullable=False),
     Column("is_conflict", Boolean, nullable=False),
     Column("occurred_at", UtcDateTime(), nullable=False),
+)
+
+historical_transfer_links = Table(
+    "historical_transfer_links",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column("stable_key", String(512), nullable=False, unique=True),
+    Column("version", String(64), nullable=False),
+    Column("evidence_type", SOURCE, nullable=False),
+    Column("source_record_ids", STRUCTURED_JSON, nullable=False),
+    Column(
+        "target_raw_import_record_id",
+        UUID,
+        ForeignKey("raw_import_records.id", ondelete="RESTRICT"),
+    ),
+    Column("target_fingerprint", String(128), nullable=True),
+    Column("canonical_asset", COIN, nullable=False),
+    Column("source_quantity", AMOUNT, nullable=False),
+    Column("target_quantity", AMOUNT, nullable=False),
+    Column(
+        "transfer_nature",
+        Enum(HistoricalTransferNature, native_enum=False),
+        nullable=False,
+    ),
+    Column(
+        "basis_coverage",
+        Enum(HistoricalBasisCoverage, native_enum=False),
+        nullable=False,
+    ),
+    Column("source_fee_quantity", AMOUNT, nullable=False),
+    Column("source_fee_asset", COIN, nullable=True),
+    Column("transport_difference", AMOUNT, nullable=False),
+    Column("evidence_hash", String(64), nullable=False),
+    Column("resolution_hash", String(64), nullable=False),
+    Column(
+        "parent_link_id",
+        UUID,
+        ForeignKey("historical_transfer_links.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column("created_at", UtcDateTime(), nullable=False),
+    Column("created_by", String(255), nullable=False),
+    CheckConstraint(
+        "source_quantity >= 0 AND target_quantity >= 0 AND "
+        "source_fee_quantity >= 0 AND transport_difference >= 0",
+        name="ck_historical_transfer_link_amounts",
+    ),
+    UniqueConstraint(
+        "evidence_hash", "resolution_hash", name="uq_historical_transfer_evidence"
+    ),
+)
+
+historical_transfer_resolutions = Table(
+    "historical_transfer_resolutions",
+    mapper_registry.metadata,
+    Column("id", UUID, primary_key=True),
+    Column(
+        "historical_transfer_link_id",
+        UUID,
+        ForeignKey("historical_transfer_links.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    ),
+    Column("stable_key", String(512), nullable=False, unique=True),
+    Column("version", String(64), nullable=False),
+    Column(
+        "status",
+        Enum(HistoricalResolutionStatus, native_enum=False),
+        nullable=False,
+    ),
+    Column(
+        "basis_coverage",
+        Enum(HistoricalBasisCoverage, native_enum=False),
+        nullable=False,
+    ),
+    Column("evidence_level", SOURCE, nullable=False),
+    Column("resolution_hash", String(64), nullable=False),
+    Column("explanation", String(2048), nullable=False),
+    Column("created_at", UtcDateTime(), nullable=False),
+    Column("created_by", String(255), nullable=False),
+    Column("resolved_at", UtcDateTime(), nullable=True),
 )
 
 financial_review_suggestions = Table(
@@ -1206,6 +1294,12 @@ def configure_mappings() -> None:
             TransformationDecision, transformation_decisions
         ),
         mapper_registry.map_imperatively(TransformationIssue, transformation_issues),
+        mapper_registry.map_imperatively(
+            HistoricalTransferLink, historical_transfer_links
+        ),
+        mapper_registry.map_imperatively(
+            HistoricalTransferResolution, historical_transfer_resolutions
+        ),
         mapper_registry.map_imperatively(
             FinancialReviewResolution, financial_review_resolutions
         ),

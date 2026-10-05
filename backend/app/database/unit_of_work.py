@@ -4,6 +4,10 @@ from typing import Self
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.entities import EarnLot, Sale
+from app.core.historical_transfer import (
+    HistoricalTransferLink,
+    HistoricalTransferResolution,
+)
 from app.core.repositories import (
     AcquisitionRepository,
     AuditRepository,
@@ -11,6 +15,8 @@ from app.core.repositories import (
     DomainProvenanceRepository,
     EarnLotRepository,
     FeeEventRepository,
+    HistoricalTransferLinkRepository,
+    HistoricalTransferResolutionRepository,
     ImportErrorRepository,
     ImportSessionRepository,
     RawImportRepository,
@@ -61,6 +67,8 @@ class SqlAlchemyUnitOfWork:
     fee_events: FeeEventRepository
     domain_provenance: DomainProvenanceRepository
     valuation_requirements: ValuationRequirementRepository
+    historical_transfer_links: HistoricalTransferLinkRepository
+    historical_transfer_resolutions: HistoricalTransferResolutionRepository
 
     def __init__(
         self,
@@ -106,6 +114,12 @@ class SqlAlchemyUnitOfWork:
         self.domain_provenance = SqlAlchemyRepository(self._session, DomainProvenance)
         self.valuation_requirements = SqlAlchemyRepository(
             self._session, ValuationRequirement
+        )
+        self.historical_transfer_links = SqlAlchemyStableProjectionRepository(
+            self._session, HistoricalTransferLink
+        )
+        self.historical_transfer_resolutions = SqlAlchemyStableProjectionRepository(
+            self._session, HistoricalTransferResolution
         )
         self.committed = False
         return self

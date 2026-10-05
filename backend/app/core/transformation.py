@@ -46,6 +46,7 @@ class AcquisitionType(StrEnum):
     CRYPTO_EXCHANGE = "crypto_exchange"
     STAKING_REWARD = "staking_reward"
     LEGACY_STAKING_REWARD = "legacy_staking_reward"
+    HISTORICAL_EXTERNAL = "historical_external"
 
 
 class DisposalType(StrEnum):

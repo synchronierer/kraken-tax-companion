@@ -29,6 +29,8 @@ from app.core.transformation import (
     TransformationIssue,
     TransformationRun,
     TransformationStatus,
+    ValuationMethod,
+    ValuationRequirement,
     ValuationStatus,
 )
 from app.core.unit_of_work import UnitOfWork
@@ -121,6 +123,8 @@ class HistoricalTransferService:
         }
         resolution_hash = _hash_payload(resolution_values)
         with self._unit_of_work_factory() as unit:
+            if source_quantity < target_quantity:
+                raise ValueError("source_quantity must cover target_quantity")
             existing = unit.historical_transfer_links.find_by_stable_key(stable_key)
             if existing is None:
                 link = HistoricalTransferLink(
@@ -200,6 +204,7 @@ class HistoricalTransferService:
         link: HistoricalTransferLink,
         now: datetime,
     ) -> None:
+        projected_quantity = Decimal("0")
         for raw_id in source_record_ids:
             try:
                 raw_record = unit.raw_imports.get(
@@ -212,7 +217,7 @@ class HistoricalTransferService:
             payload = {str(key): value for key, value in raw_record.payload.items()}
             record_type = str(payload.get("record_type", "")).lower()
             occurred_at = _timestamp(payload)
-            if record_type not in {"buy", "acquisition"}:
+            if record_type not in {"buy", "acquisition", "partner_program"}:
                 if record_type in {"network_fee", "withdrawal"}:
                     self._project_direct_fee(
                         unit=unit,
@@ -225,13 +230,7 @@ class HistoricalTransferService:
                 continue
             quantity = _decimal(payload, "quantity")
             cost_eur = _decimal(payload, "cost_eur")
-            if (
-                quantity is None
-                or quantity <= 0
-                or cost_eur is None
-                or cost_eur <= 0
-                or occurred_at is None
-            ):
+            if quantity is None or quantity <= 0 or occurred_at is None:
                 self._gap(unit, run, raw_record.id, link, quantity, now)
                 continue
             try:
@@ -242,9 +241,11 @@ class HistoricalTransferService:
             if asset.canonical_code is None:
                 self._gap(unit, run, raw_record.id, link, quantity, now)
                 continue
+            projected_quantity += quantity
             stable_key = (
                 f"historical-acquisition:{raw_record.external_id or raw_record.id}"
             )
+            has_eur_cost = cost_eur is not None and cost_eur > 0
             lot = AcquisitionLot(
                 stable_key=stable_key,
                 payload_hash=raw_record.content_hash,
@@ -259,10 +260,14 @@ class HistoricalTransferService:
                 wallet_scope=EXTERNAL_WALLET_SCOPE,
                 external_id=raw_record.external_id or str(raw_record.id),
                 transformation_version=HISTORICAL_TRANSFER_VERSION,
-                valuation_status=ValuationStatus.NATIVE_EUR_AVAILABLE,
-                tax_treatment_hint=TaxTreatmentHint.TRADE_ACQUISITION,
-                native_consideration_asset="EUR",
-                native_consideration_quantity=cost_eur,
+                valuation_status=(
+                    ValuationStatus.NATIVE_EUR_AVAILABLE
+                    if has_eur_cost
+                    else ValuationStatus.VALUATION_REQUIRED
+                ),
+                tax_treatment_hint=TaxTreatmentHint.HISTORICAL_EXTERNAL,
+                native_consideration_asset="EUR" if has_eur_cost else None,
+                native_consideration_quantity=cost_eur if has_eur_cost else None,
                 created_at=now,
             )
             existing = unit.acquisitions.find_by_stable_key(stable_key)
@@ -278,6 +283,21 @@ class HistoricalTransferService:
                         transformation_run_id=run.id,
                     )
                 )
+                if not has_eur_cost:
+                    unit.valuation_requirements.add(
+                        ValuationRequirement(
+                            asset_code=lot.asset_code,
+                            target_currency="EUR",
+                            valuation_at=lot.occurred_at,
+                            method=ValuationMethod.DAILY_AVERAGE,
+                            status=ValuationStatus.VALUATION_REQUIRED,
+                            reason_code="historical_external_acquisition",
+                            domain_object_type="AcquisitionLot",
+                            domain_object_id=lot.id,
+                            transformation_run_id=run.id,
+                            created_at=now,
+                        )
+                    )
             fee = _decimal(payload, "fee_quantity")
             fee_asset = str(payload.get("fee_asset", "")).strip().upper()
             if fee is None or fee <= 0 or not fee_asset:
@@ -291,6 +311,71 @@ class HistoricalTransferService:
                 occurred_at=occurred_at,
                 related_object_id=lot.id if existing is None else existing.id,
                 now=now,
+            )
+        if link.source_fee_quantity > 0 and link.source_fee_asset:
+            fee_key = f"historical-transfer-fee:{link.stable_key}"
+            if unit.fee_events.find_by_stable_key(fee_key) is None:
+                source_record = next(
+                    (
+                        unit.raw_imports.get(
+                            raw_id if isinstance(raw_id, UUID) else UUID(raw_id)
+                        )
+                        for raw_id in source_record_ids
+                        if _raw_uuid(raw_id) is not None
+                    ),
+                    None,
+                )
+                if source_record is not None:
+                    fee_event = FeeEvent(
+                        stable_key=fee_key,
+                        payload_hash=link.evidence_hash,
+                        asset_code=link.source_fee_asset,
+                        quantity=link.source_fee_quantity,
+                        occurred_at=source_record.created_at,
+                        provider=source_record.source,
+                        external_id=fee_key,
+                        transformation_version=HISTORICAL_TRANSFER_VERSION,
+                        valuation_status=ValuationStatus.VALUATION_REQUIRED,
+                        related_object_id=link.id,
+                        created_at=now,
+                    )
+                    unit.fee_events.add(fee_event)
+                    run.created_objects += 1
+                    unit.domain_provenance.add(
+                        DomainProvenance(
+                            domain_object_type="FeeEvent",
+                            domain_object_id=fee_event.id,
+                            raw_import_record_id=source_record.id,
+                            import_session_id=source_record.import_session_id,
+                            transformation_run_id=run.id,
+                        )
+                    )
+                    unit.valuation_requirements.add(
+                        ValuationRequirement(
+                            asset_code=fee_event.asset_code,
+                            target_currency="EUR",
+                            valuation_at=fee_event.occurred_at,
+                            method=ValuationMethod.DAILY_AVERAGE,
+                            status=ValuationStatus.VALUATION_REQUIRED,
+                            reason_code="historical_external_fee",
+                            domain_object_type="FeeEvent",
+                            domain_object_id=fee_event.id,
+                            transformation_run_id=run.id,
+                            created_at=now,
+                        )
+                    )
+        if projected_quantity > 0 and projected_quantity < link.source_quantity:
+            self._gap(
+                unit,
+                run,
+                link.target_raw_import_record_id,
+                link,
+                link.source_quantity - projected_quantity,
+                now,
+                reason=(
+                    "The imported external acquisition quantities do not cover "
+                    "the documented source quantity."
+                ),
             )
 
     @staticmethod
@@ -362,7 +447,7 @@ class HistoricalTransferService:
     def _gap(
         unit: UnitOfWork,
         run: TransformationRun,
-        raw_record_id: UUID,
+        raw_record_id: UUID | None,
         link: HistoricalTransferLink,
         quantity: Decimal | None,
         now: datetime,
@@ -371,6 +456,15 @@ class HistoricalTransferService:
         unresolved = (
             quantity if quantity is not None and quantity > 0 else link.target_quantity
         )
+        if raw_record_id is None:
+            fallback = next(iter(link.source_record_ids), None)
+            if fallback is not None:
+                try:
+                    raw_record_id = UUID(fallback)
+                except ValueError:
+                    raw_record_id = None
+        if raw_record_id is None:
+            return
         unit.transformation_issues.add(
             TransformationIssue(
                 transformation_run_id=run.id,
@@ -394,3 +488,12 @@ def _resolution_status(
     if coverage is HistoricalBasisCoverage.PARTIAL:
         return HistoricalResolutionStatus.PARTIAL
     return HistoricalResolutionStatus.REVIEW_REQUIRED
+
+
+def _raw_uuid(value: str | UUID) -> UUID | None:
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(value)
+    except ValueError:
+        return None

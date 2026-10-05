@@ -21,6 +21,11 @@ from app.adapters.kraken.trade_reconciliation import (
     reconcile_trade_ledgers,
 )
 from app.core.entities import AuditActorType, AuditEvent, RawImportRecord
+from app.core.historical_transfer import (
+    HistoricalResolutionStatus,
+    HistoricalTransferLink,
+    HistoricalTransferNature,
+)
 from app.core.time import utc_now
 from app.core.transformation import (
     AcquisitionLot,
@@ -240,6 +245,7 @@ class KrakenTransformationService:
                 eth2_shapella_migration_records = _eth2_shapella_migration_record_ids(
                     all_records
                 )
+                historical_transfer_records = _historical_transfer_records(unit)
                 grouped_ids = {
                     record.id
                     for group in ledger_groups.values()
@@ -261,6 +267,7 @@ class KrakenTransformationService:
                             reconciled_trade_ledgers,
                             internal_autoallocation_records,
                             eth2_shapella_migration_records,
+                            historical_transfer_records,
                         )
                     elif record.source == "kraken-trades":
                         self._transform_trade(unit, run, record, counters, problems)
@@ -713,10 +720,44 @@ class KrakenTransformationService:
         reconciled_trade_ledgers: frozenset[UUID],
         internal_autoallocation_records: frozenset[UUID],
         eth2_shapella_migration_records: frozenset[UUID],
+        historical_transfer_records: dict[UUID, HistoricalTransferLink],
     ) -> None:
         values = _values(record)
         kind = values.get("type", "").lower()
         subtype = values.get("subtype", "").lower()
+        historical_link = historical_transfer_records.get(record.id)
+        if historical_link is not None:
+            resolution = _historical_resolution_for_link(unit, historical_link)
+            if (
+                resolution
+                in {
+                    HistoricalResolutionStatus.RESOLVED,
+                    HistoricalResolutionStatus.PARTIAL,
+                }
+                and historical_link.transfer_nature
+                is HistoricalTransferNature.SELF_TRANSFER
+            ):
+                counters.internal += 1
+                self._decision(
+                    unit,
+                    run,
+                    record,
+                    DecisionType.INTERNAL_MOVEMENT,
+                    "ledger_historical_self_transfer_resolved",
+                    (
+                        "The Kraken deposit is linked to explicit external historical "
+                        "self-transfer evidence with "
+                        f"{historical_link.basis_coverage.value} "
+                        "cost-basis coverage."
+                    ),
+                )
+                self._audit(
+                    unit,
+                    run,
+                    "transformation.historical_transfer_resolved",
+                    {"raw_id": str(record.id)},
+                )
+                return
         if record.id in eth2_shapella_migration_records:
             counters.internal += 1
             self._decision(
@@ -1593,6 +1634,57 @@ def _optional_finite_decimal(value: str) -> Decimal | None:
     except InvalidOperation:
         return None
     return parsed if parsed.is_finite() else None
+
+
+def _historical_transfer_records(
+    unit: UnitOfWork,
+) -> dict[UUID, HistoricalTransferLink]:
+    records: dict[UUID, HistoricalTransferLink] = {}
+    raw_records = {
+        record.id: record
+        for record in unit.raw_imports.list()
+        if record.source == "kraken-ledgers"
+    }
+    for link in unit.historical_transfer_links.list():
+        target_id = link.target_raw_import_record_id
+        if target_id is None or not _historical_target_matches(
+            link, raw_records.get(target_id)
+        ):
+            continue
+        records[target_id] = link
+    return records
+
+
+def _historical_target_matches(
+    link: HistoricalTransferLink, record: RawImportRecord | None
+) -> bool:
+    """Require the resolution to match the exact imported Kraken deposit."""
+    if record is None or link.target_fingerprint != record.content_hash:
+        return False
+    values = _values(record)
+    if values.get("type", "").lower() != "deposit":
+        return False
+    try:
+        amount = Decimal(values.get("amount", ""))
+        asset = _record_asset(
+            record, values.get("asset", ""), TRANSFORMATION_CONTRACT_VERSION
+        )
+    except (InvalidOperation, ValueError):
+        return False
+    return (
+        amount == link.target_quantity
+        and asset.canonical_code == link.canonical_asset
+        and amount > 0
+    )
+
+
+def _historical_resolution_for_link(
+    unit: UnitOfWork, link: HistoricalTransferLink
+) -> HistoricalResolutionStatus | None:
+    for resolution in unit.historical_transfer_resolutions.list():
+        if resolution.historical_transfer_link_id == link.id:
+            return resolution.status
+    return None
 
 
 def _optional_timestamp(value: str) -> datetime | None:

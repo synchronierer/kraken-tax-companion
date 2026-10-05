@@ -39,6 +39,7 @@ class TaxTreatmentHint(StrEnum):
     TRADE_DISPOSAL = "trade_disposal"
     CRYPTO_ASSET_EXCHANGE = "crypto_asset_exchange"
     CRYPTO_FEE_CANDIDATE = "crypto_fee_candidate"
+    HISTORICAL_EXTERNAL = "historical_external"
 
 
 class AcquisitionType(StrEnum):

@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -12,11 +13,15 @@ from app.adapters.historical_sources import (
     BITTREX_SOURCE,
     BitcoinDeStatementRecord,
     BittrexOrderHistoryRecord,
+    parse_bitcoin_de_csv,
     parse_bitcoin_de_records,
     parse_bitcoin_de_statement,
+    parse_bittrex_csv,
     parse_bittrex_order_history,
     parse_bittrex_records,
 )
+from app.adapters.kraken import transformation as kraken_transformation
+from app.adapters.kraken.transformation import KrakenTransformationService
 from app.core.entities import AuditActorType, ImportSession, ImportStatus
 from app.core.historical_transfer import (
     HistoricalBasisCoverage,
@@ -37,13 +42,18 @@ from app.core.transformation import (
     AssetIdentity,
     FeeEvent,
     MappingStatus,
+    TransformationDecision,
     TransformationIssue,
+    TransformationRun,
+    TransformationStatus,
+    ValuationRequirement,
 )
 from app.database.base import Base
 from app.database.unit_of_work import SqlAlchemyUnitOfWork
 from app.imports.context import ImportContext
 from app.imports.service import ImportService, RawRecordInput
 from app.imports.validation import RequiredFieldsValidator
+from app.services import historical_transfer as historical_transfer_service
 from app.services.historical_transfer import HistoricalTransferService
 
 NOW = datetime(2026, 1, 1, 12, tzinfo=UTC)
@@ -604,3 +614,295 @@ def test_btc_fifo_regression_uses_exact_decimal_allocations() -> None:
     assert result.allocations[5].allocated_quantity == Decimal("0.00007986")
     remaining = [lot.remaining_quantity for lot in result.lots]
     assert remaining[-2:] == [Decimal("0.09118665"), Decimal("0.23359506")]
+
+
+def test_real_export_parsers_normalize_german_and_bittrex_rows(tmp_path) -> None:
+    bitcoin_path = tmp_path / "bitcoin.csv"
+    bitcoin_path.write_text(
+        "Datum;Typ;Währung;Referenz;Menge nach Bitcoin.de-Gebühr;"
+        "Einheit (Menge nach Bitcoin.de-Gebühr);Zu- / Abgang\n"
+        '"2020-12-22 18:15:19";Netzwerk-Gebühr;ETH;TX; ; ;-0.00191730\n'
+        '"2020-08-10 09:46:02";Kauf;ETH;EPX8XN;988.94;EUR;2.92050000\n'
+        '"2020-08-11T09:46:02Z";Korrekturposition;ETH;;;;0.00000001\n',
+        encoding="utf-8",
+    )
+    bittrex_path = tmp_path / "bittrex.csv"
+    bittrex_path.write_text(
+        "Uuid,Exchange,TimeStamp,OrderType,Quantity,Price,PricePerUnit\n"
+        "ORDER-1,BTC-DOGE,2/10/2018 10:44:26 AM,LIMIT_BUY,841.39125000,"
+        "0.00050483,0.00000060\n"
+        "ORDER-2,BTC-DOGE,,UNKNOWN,1,0,0\n"
+        "ORDER-3,BTC-DOGE,2/10/2018 10:44:26 AM,LIMIT_SELL,1,0,0\n",
+        encoding="utf-8",
+    )
+    bitcoin = parse_bitcoin_de_csv(bitcoin_path)
+    bittrex = parse_bittrex_csv(bittrex_path)
+    assert bitcoin[0].payload["record_type"] == "network_fee"
+    assert bitcoin[0].payload["fee_quantity"] == "0.00191730"
+    assert bitcoin[1].payload["record_type"] == "buy"
+    assert bitcoin[1].payload["cost_eur"] == "988.94"
+    assert bitcoin[2].payload["record_type"] == "correction"
+    assert bittrex[0].payload["record_type"] == "buy"
+    assert bittrex[0].payload["asset"] == "DOGE"
+    assert bittrex[1].payload["occurred_at"] == ""
+    assert bittrex[2].payload["record_type"] == "sell"
+
+
+def test_known_date_without_eur_cost_requires_valuation_not_gap() -> None:
+    factory = database_factory()
+    row = parse_bitcoin_de_statement(
+        {
+            "id": "KNOWN-DATE-NO-EUR",
+            "type": "partner_program",
+            "asset": "BTC",
+            "quantity": "0.00001805",
+            "date": "2018-02-01T00:00:00Z",
+        }
+    )
+    import_rows(factory, BITCOIN_DE_SOURCE, [row])
+    source_id = raw_id(factory, "bitcoin-de:statement:KNOWN-DATE-NO-EUR")
+    HistoricalTransferService(
+        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory), clock=lambda: NOW
+    ).resolve(
+        source_record_ids=(source_id,),
+        canonical_asset="BTC",
+        source_quantity=Decimal("0.00001805"),
+        target_quantity=Decimal("0.00001805"),
+        transfer_nature=HistoricalTransferNature.SELF_TRANSFER,
+        basis_coverage=HistoricalBasisCoverage.COMPLETE,
+        evidence_type=BITCOIN_DE_SOURCE,
+    )
+    with factory() as database:
+        lot = database.scalars(select(AcquisitionLot)).one()
+        requirement = database.scalars(select(ValuationRequirement)).one()
+        assert lot.quantity == Decimal("0.00001805")
+        assert lot.valuation_status.value == "valuation_required"
+        assert requirement.reason_code == "historical_external_acquisition"
+        assert (
+            database.scalar(select(func.count()).select_from(TransformationIssue)) == 0
+        )
+
+
+def test_resolved_target_deposit_is_internal_without_new_kraken_lot() -> None:
+    factory = database_factory()
+    source = parse_bitcoin_de_statement(
+        {
+            "id": "SOURCE-BUY",
+            "type": "buy",
+            "asset": "BTC",
+            "quantity": "1",
+            "cost_eur": "1000",
+            "date": "2018-01-01T00:00:00Z",
+        }
+    )
+    source_session, _ = import_rows(factory, BITCOIN_DE_SOURCE, [source])
+    target = RawRecordInput(
+        payload={
+            "txid": "TARGET-DEPOSIT",
+            "refid": "TARGET-REF",
+            "time": "2021-01-01 00:00:00",
+            "type": "deposit",
+            "subtype": "",
+            "asset": "XXBT",
+            "amount": "1",
+            "fee": "0",
+        },
+        external_id="kraken:ledger:TARGET-DEPOSIT",
+        canonical_key="kraken:ledger:TARGET-DEPOSIT",
+        technical_metadata={
+            "canonical_asset": {
+                "raw_asset": "XXBT",
+                "normalized_asset": "BTC",
+                "is_unambiguous": True,
+            },
+            "asset_mapping_version": "kraken-assets-v2",
+        },
+    )
+    target_session, _ = import_inputs(factory, "kraken-ledgers", [target])
+    source_id = raw_id(factory, "bitcoin-de:statement:SOURCE-BUY")
+    target_id = raw_id(factory, "kraken:ledger:TARGET-DEPOSIT")
+    with factory() as database:
+        target_hash = database.get(models.RawImportRecord, target_id).content_hash
+    HistoricalTransferService(
+        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory), clock=lambda: NOW
+    ).resolve(
+        source_record_ids=(source_id,),
+        canonical_asset="BTC",
+        source_quantity=Decimal("1"),
+        target_quantity=Decimal("1"),
+        transfer_nature=HistoricalTransferNature.SELF_TRANSFER,
+        basis_coverage=HistoricalBasisCoverage.COMPLETE,
+        evidence_type=BITCOIN_DE_SOURCE,
+        target_raw_import_record_id=target_id,
+        target_fingerprint=target_hash,
+        source_fee_quantity=Decimal("0.01"),
+        source_fee_asset="BTC",
+    )
+    result = KrakenTransformationService(
+        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory), clock=lambda: NOW
+    ).transform(
+        import_session_ids=(target_session,),
+        context_import_session_ids=(source_session,),
+        actor_id="test-suite",
+    )
+    assert result.review_cases == 0
+    with factory() as database:
+        decisions = database.scalars(select(TransformationDecision)).all()
+        assert decisions[-1].reason_code == "ledger_historical_self_transfer_resolved"
+        assert database.scalar(select(func.count()).select_from(AcquisitionLot)) == 1
+        assert database.scalar(select(func.count()).select_from(FeeEvent)) == 1
+
+
+def test_historical_resolution_rejects_target_mismatch_and_bad_quantities() -> None:
+    factory = database_factory()
+    with pytest.raises(ValueError, match="source_quantity"):
+        HistoricalTransferService(
+            unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory),
+            clock=lambda: NOW,
+        ).resolve(
+            source_record_ids=(),
+            canonical_asset="BTC",
+            source_quantity=Decimal("0.1"),
+            target_quantity=Decimal("0.2"),
+            transfer_nature=HistoricalTransferNature.SELF_TRANSFER,
+            basis_coverage=HistoricalBasisCoverage.COMPLETE,
+            evidence_type=BITCOIN_DE_SOURCE,
+        )
+
+
+def test_historical_target_match_is_fail_closed() -> None:
+    factory = database_factory()
+    source_session, _ = import_rows(
+        factory,
+        BITCOIN_DE_SOURCE,
+        [
+            parse_bitcoin_de_statement(
+                {
+                    "id": "TARGET-SOURCE",
+                    "type": "buy",
+                    "asset": "BTC",
+                    "quantity": "1",
+                    "cost_eur": "1000",
+                    "date": "2018-01-01T00:00:00Z",
+                }
+            )
+        ],
+    )
+    target_session, _ = import_inputs(
+        factory,
+        "kraken-ledgers",
+        [
+            RawRecordInput(
+                payload={
+                    "txid": "TARGET-MATCH",
+                    "refid": "TARGET-MATCH",
+                    "time": "2021-01-01 00:00:00",
+                    "type": "deposit",
+                    "subtype": "",
+                    "asset": "XXBT",
+                    "amount": "1",
+                    "fee": "0",
+                },
+                external_id="kraken:ledger:TARGET-MATCH",
+                canonical_key="kraken:ledger:TARGET-MATCH",
+                technical_metadata={
+                    "canonical_asset": {
+                        "raw_asset": "XXBT",
+                        "normalized_asset": "BTC",
+                        "is_unambiguous": True,
+                    },
+                    "asset_mapping_version": "kraken-assets-v2",
+                },
+            )
+        ],
+    )
+    source_id = raw_id(factory, "bitcoin-de:statement:TARGET-SOURCE")
+    target_id = raw_id(factory, "kraken:ledger:TARGET-MATCH")
+    with factory() as database:
+        record = database.get(models.RawImportRecord, target_id)
+        assert record is not None
+        target_hash = record.content_hash
+    HistoricalTransferService(
+        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory), clock=lambda: NOW
+    ).resolve(
+        source_record_ids=(source_id,),
+        canonical_asset="BTC",
+        source_quantity=Decimal("1"),
+        target_quantity=Decimal("1"),
+        transfer_nature=HistoricalTransferNature.SELF_TRANSFER,
+        basis_coverage=HistoricalBasisCoverage.COMPLETE,
+        evidence_type=BITCOIN_DE_SOURCE,
+        target_raw_import_record_id=target_id,
+        target_fingerprint=target_hash,
+    )
+    with factory() as database:
+        link = database.scalars(select(HistoricalTransferLink)).one()
+        raw = database.get(models.RawImportRecord, target_id)
+        assert raw is not None
+        assert kraken_transformation._historical_target_matches(link, raw)
+        assert not kraken_transformation._historical_target_matches(link, None)
+        assert not kraken_transformation._historical_target_matches(
+            replace(link, target_fingerprint="wrong"), raw
+        )
+        assert not kraken_transformation._historical_target_matches(
+            link, replace(raw, payload={**raw.payload, "type": "withdrawal"})
+        )
+        assert not kraken_transformation._historical_target_matches(
+            link, replace(raw, payload={**raw.payload, "amount": "not-a-number"})
+        )
+        assert not kraken_transformation._historical_target_matches(
+            link, replace(raw, payload={**raw.payload, "amount": "2"})
+        )
+        with SqlAlchemyUnitOfWork(factory) as unit:
+            assert (
+                kraken_transformation._historical_resolution_for_link(
+                    unit, replace(link, id=new_id())
+                )
+                is None
+            )
+        database.execute(
+            models.RawImportRecord.__table__.update()
+            .where(models.RawImportRecord.id == target_id)
+            .values(content_hash="changed-after-resolution")
+        )
+        database.commit()
+    result = KrakenTransformationService(
+        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory), clock=lambda: NOW
+    ).transform(
+        import_session_ids=(target_session,),
+        context_import_session_ids=(source_session,),
+        actor_id="test-suite",
+    )
+    assert result.review_cases == 1
+
+
+def test_cost_gap_with_unparseable_source_id_fails_closed() -> None:
+    factory = database_factory()
+    link = HistoricalTransferLink(
+        stable_key="gap-test",
+        version="v1",
+        evidence_type=BITCOIN_DE_SOURCE,
+        source_record_ids=("not-a-uuid",),
+        canonical_asset="BTC",
+        source_quantity=Decimal("1"),
+        target_quantity=Decimal("1"),
+        transfer_nature=HistoricalTransferNature.SELF_TRANSFER,
+        basis_coverage=HistoricalBasisCoverage.PARTIAL,
+        source_fee_quantity=Decimal("0"),
+        source_fee_asset=None,
+        transport_difference=Decimal("0"),
+        evidence_hash="evidence",
+        resolution_hash="resolution",
+    )
+    run = TransformationRun(
+        contract_version="test",
+        status=TransformationStatus.COMPLETED,
+        started_at=NOW,
+        actor_id="test-suite",
+    )
+    with SqlAlchemyUnitOfWork(factory) as unit:
+        unit.transformation_runs.add(run)
+        HistoricalTransferService._gap(unit, run, None, link, Decimal("0.1"), NOW)
+        unit.commit()
+    assert historical_transfer_service._raw_uuid(UUID(int=1)) == UUID(int=1)
+    assert historical_transfer_service._raw_uuid("not-a-uuid") is None

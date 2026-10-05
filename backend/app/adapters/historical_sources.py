@@ -4,9 +4,11 @@ These adapters only canonicalize source rows into RawRecordInput objects. They
 do not assign tax treatment or create domain projections.
 """
 
+import csv
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 from app.imports.hashing import canonical_sha256
@@ -44,6 +46,25 @@ def _timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _source_timestamp(value: Any) -> datetime | None:
+    """Parse the naive timestamps used by the historical exports as UTC.
+
+    The exports do not carry an offset.  The normalized timestamp is explicit
+    and timezone-aware at the application boundary; no local machine timezone
+    is consulted.
+    """
+
+    text = _text(value)
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%m/%d/%Y %I:%M:%S %p"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return _timestamp(text)
+
+
 def _first(raw: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in raw:
@@ -63,18 +84,27 @@ def _bitcoin_de_type(value: str) -> str:
         "verkauf": "sell",
         "withdrawal": "withdrawal",
         "payout": "withdrawal",
+        "auszahlung": "withdrawal",
         "network_fee": "network_fee",
         "networkfee": "network_fee",
         "mining_fee": "network_fee",
+        "netzwerk_gebühr": "network_fee",
+        "netzwerkgebühr": "network_fee",
         "partner_program": "partner_program",
         "affiliate": "partner_program",
+        "partnerprogramm": "partner_program",
         "correction": "correction",
         "adjustment": "correction",
+        "korrekturposition": "correction",
     }.get(normalized, "unknown")
 
 
 def _bittrex_type(value: str) -> str:
     normalized = value.strip().lower().replace("-", "_")
+    if normalized.endswith("_buy"):
+        return "buy"
+    if normalized.endswith("_sell"):
+        return "sell"
     return {
         "buy": "buy",
         "sell": "sell",
@@ -234,3 +264,76 @@ def parse_bitcoin_de_records(
 
 def parse_bittrex_records(records: list[dict[str, Any]]) -> list[RawRecordInput]:
     return [parse_bittrex_order_history(record).raw_record() for record in records]
+
+
+def _bitcoin_de_csv_row(row: dict[str, str]) -> dict[str, Any]:
+    asset = _text(row.get("Währung")).upper()
+    kind = _text(row.get("Typ"))
+    normalized_kind = _bitcoin_de_type(kind)
+    reference = _text(row.get("Referenz"))
+    occurred_at = _source_timestamp(row.get("Datum"))
+    movement = _decimal(row.get("Zu- / Abgang"))
+    amount_after = _decimal(row.get(f"{asset} nach Bitcoin.de-Gebühr"))
+    cost_after = _decimal(row.get("Menge nach Bitcoin.de-Gebühr"))
+    cost_unit = _text(row.get("Einheit (Menge nach Bitcoin.de-Gebühr)"))
+    if normalized_kind == "buy":
+        quantity = amount_after if amount_after is not None else movement
+        cost_eur = cost_after if cost_unit == "EUR" else None
+        source_id = reference
+    elif normalized_kind in {"withdrawal", "network_fee"}:
+        quantity = None
+        cost_eur = None
+        source_id = f"{reference}:{normalized_kind}"
+    else:
+        quantity = movement
+        cost_eur = None
+        source_id = reference or f"{asset}:{kind}:{row.get('Datum', '')}"
+    fee_quantity = None
+    if normalized_kind == "network_fee" and movement is not None:
+        fee_quantity = abs(movement)
+    return {
+        "source_id": source_id,
+        "occurred_at": occurred_at.isoformat() if occurred_at else "",
+        "record_type": normalized_kind,
+        "asset": asset,
+        "quantity": str(quantity) if quantity is not None else "",
+        "cost_eur": str(cost_eur) if cost_eur is not None else "",
+        "fee_quantity": str(fee_quantity) if fee_quantity is not None else "",
+        "fee_asset": asset if fee_quantity is not None else "",
+        "reference": reference,
+        "raw_type": kind,
+    }
+
+
+def parse_bitcoin_de_csv(path: str | Path) -> list[RawRecordInput]:
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = csv.DictReader(handle, delimiter=";")
+        return parse_bitcoin_de_records([_bitcoin_de_csv_row(row) for row in rows])
+
+
+def _bittrex_csv_row(row: dict[str, str]) -> dict[str, Any]:
+    exchange = _text(row.get("Exchange"))
+    asset = exchange.rsplit("-", maxsplit=1)[-1].upper()
+    order_type = _text(row.get("OrderType"))
+    record_type = _bittrex_type(order_type)
+    source_id = _text(row.get("Uuid"))
+    occurred_at = _source_timestamp(row.get("TimeStamp"))
+    return {
+        "source_id": source_id,
+        "occurred_at": occurred_at.isoformat() if occurred_at else "",
+        "record_type": record_type,
+        "asset": asset,
+        "quantity": _text(row.get("Quantity")),
+        "price": _text(row.get("PricePerUnit") or row.get("Price")),
+        "cost": _text(row.get("Price")),
+        "fee_quantity": "",
+        "fee_asset": "",
+        "market": exchange,
+        "raw_type": order_type,
+    }
+
+
+def parse_bittrex_csv(path: str | Path) -> list[RawRecordInput]:
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = csv.DictReader(handle)
+        return parse_bittrex_records([_bittrex_csv_row(row) for row in rows])

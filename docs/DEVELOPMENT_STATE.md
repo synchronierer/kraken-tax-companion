@@ -238,7 +238,7 @@ dedicated change rather than silently depending on a temporary file.
 
 ## Sprint 5B.3.8 Phase B.1 – Historical transfer evidence
 
-Status: IMPLEMENTED LOCALLY, TESTED, NOT COMMITTED, NOT DEPLOYED, NOT USED FOR
+Status: COMMITTED IN THE CURRENT DEVELOPMENT HEAD, NOT DEPLOYED, NOT USED FOR
 PRODUCTION DATA.
 
 B.1 adds the smallest persistent, auditable evidence model:
@@ -267,17 +267,55 @@ Validation completed:
 - backend coverage: 100%;
 - Ruff: PASS;
 - Black: PASS;
-- mypy: PASS;
+- Mypy is a known baseline/technical-debt exception, not a passing gate:
+  canonical command `mypy backend/app` reports 12 existing errors at B.1
+  commit `67bee35132ebaf361616f2c1291934877afc9fc1`; the current B.2 working
+  tree reports the byte-identical 12 errors, exclusively in
+  `app/api/tax.py` and `app/api/workflows.py`. B.2 changes neither file and
+  introduces no new Mypy errors;
 - no provider access, production database access, TaxCalculationRun,
   review decision, order, or Historical Import was performed.
 
+## Sprint 5B.3.8 Phase B.2 – External historical deposit evidence
+
+Status: IMPLEMENTED, OFFLINE-REAL-DATA VALIDATED, COMMITTED IN THIS CHANGE,
+NOT DEPLOYED, NOT USED FOR PRODUCTION DATA.
+
+B.2 adds deterministic loaders for the supplied Bitcoin.de and Bittrex exports,
+projects only explicitly linked historical source records, preserves original
+acquisition dates and costs, records valuation requirements where an access
+date is known but EUR value is absent, and keeps partial cost-basis gaps as
+`historical_cost_basis_gap`. Kraken deposit transformation resolves only when
+the link fingerprint, deposit type, canonical asset, and exact amount match;
+otherwise the existing review path remains active.
+
+The offline real-data gate used a fresh `sqlite3.Connection.backup()` copy of
+the pristine sandbox. It imported the complete local ledger, complete local
+trade history, and the five supplied historical source files with no network.
+Eight of the eleven historical deposit cases resolved as explicit historical
+self-transfers; three remain `ledger_deposit_requires_review`. No Kraken-date
+acquisition is created for a resolved deposit. A second identical
+transformation pass created no additional domain objects.
+
+Validated gate totals after the first pass were AcquisitionLots 2711,
+DisposalEvents 13, FeeEvents 49, TradeExecutions 39, and
+ValuationRequirements 2759. Ledger/trade reconciliation was 39/39 matched;
+the ledger pass reported three remaining deposit reviews and zero conflicts.
+
+Focused B.2 tests: 18 passed. The full backend suite ran 663 tests successfully
+in the offline container with 100% coverage. Ruff and Black pass. Mypy reports
+the same pre-existing errors in
+`app/api/tax.py` and `app/api/workflows.py`; B.2 introduces no new mypy error.
+
+No provider access, production database access, TaxCalculationRun,
+automatic review decision, order, or production Historical Import was
+performed.
+
 ## Current next step
 
-Review B.1 before starting Phase B.2. The next implementation phase may build a
-deterministic resolver for the remaining Kraken deposit reviews only after
-offline evidence is explicitly mapped to these links. It must remain fail
-closed, preserve original imports, and never mutate production during analysis.
-No automatic resolution of the real deposit cases is part of B.1.
+B.2 is committed for review. No production migration or Historical Import is
+authorized by this phase; production deployment remains a separate explicit
+step.
 
 ## Handoff discipline
 

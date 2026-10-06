@@ -2,73 +2,61 @@
 
 ## Task
 
-5B.3.10A Valuation Requirement Differential Audit.
+Sprint 5B.3.10C full idempotence validation.
 
 ## Result
 
-The controlled production import remains safely aborted before any production
-mutation. A fresh shadow run deterministically produced 2,756 valuation
-requirements instead of the expected 2,759.
+`5B.3.10C_FULL_IDEMPOTENCE_PASS`
+
+The complete offline historical workflow passed its repeated-run idempotence
+gate. Repeated execution created no duplicate domain objects and produced the
+same domain and review results.
 
 ## Repository State
 
-- `main` HEAD: `75a2618659ca9183777862196e053ae3b79f8483`
-- `origin/main`: `75a2618659ca9183777862196e053ae3b79f8483`
-- Development checkout was clean before this status-only branch was created.
-- `codex-status` is intentionally separate from `main` and must never be merged.
+- Development branch: `main`
+- Status branch: `codex-status`
+- `main` remains unchanged by this status update.
+- Status content is maintained only on `codex-status`, which must never be
+  merged into `main`.
 
 ## Summary
 
-The audit found exactly three missing valuation requirements for direct external
-Bitcoin.de network-fee projections: ETH, BCH, and BTC. The corresponding
-FeeEvents exist and are marked as requiring valuation, but the direct-fee
-projection path does not create a ValuationRequirement. The three manually
-specified Bittrex/Bitcoin.de fee requirements are present.
-
-The discrepancy is deterministic and is a code defect, not nondeterminism or
-contaminated source data. No code was changed for this audit.
+The historical import, transfer-evidence resolution, ledger transformation,
+trade transformation, and repeated-run checks completed successfully in the
+offline validation environment.
 
 ## Tests / Quality Gates
 
-- Existing shadow gate: production import aborted safely on the valuation-count
-  mismatch.
-- Fresh shadow rerun from the current PRE backup: reproduced 2,756.
-- Both shadow databases passed SQLite integrity checks.
-- No repository tests or quality gates were changed or bypassed.
+- Full idempotence gate: PASS
+- Repeated transformation runs: PASS
+- No duplicate domain objects: PASS
+- No production services, providers, or production database were used.
 
 ## Data / Domain Results
 
-- Shadow FeeEvents: 49
-- Shadow ValuationRequirements: 2,756
-- HistoricalTransferLinks: 8
-- HistoricalTransferResolutions: 8 (6 resolved, 2 partial)
-- External RawImportRecords: 52 with matching canonical keys/content hashes
-- Trade reconciliation remained 39 matched, 0 partial, 0 pending, 0 conflict.
-
-The three missing requirements correspond to direct external network fees whose
-source records contain no EUR valuation. They therefore require valuation.
+- Historical transfer links and resolutions remained stable across runs.
+- AcquisitionLots, DisposalEvents, FeeEvents, TradeExecutions, and
+  ValuationRequirements were unchanged by the second run.
+- Trade/ledger reconciliation remained fully matched.
 
 ## Safety
 
-- No production database was changed.
-- No production migration or historical import was executed.
-- No services were stopped.
-- No TaxCalculationRun, review decision, provider call, or order occurred.
-- No secrets or private credentials were accessed or recorded.
+- No production database mutation.
+- No migration, Historical Import, TaxCalculationRun, review decision, or
+  order.
+- No Kraken or other provider calls.
+- No secrets or private financial details recorded.
 
 ## Changed Files
 
-- `CODEX_STATUS.md` on branch `codex-status` only.
+- `CODEX_STATUS.md` on `codex-status` only.
 
 ## Git State
 
-- Status report branch: `codex-status`
-- This branch is separate from `main` and is for status communication only.
-- Only this status file will be committed and pushed.
+- This report is committed and pushed only on `codex-status`.
+- `main` was not modified.
 
 ## Next Decision Required
 
-Review whether the direct external fee projection should create the same
-`historical_external_fee` ValuationRequirements as the explicit source-fee
-projection. Do not resume production import until the decision is implemented,
-tested, and the complete offline shadow gate passes.
+Review the full idempotence result before any further production action.

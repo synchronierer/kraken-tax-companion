@@ -2,61 +2,57 @@
 
 ## Task
 
-Sprint 5B.3.10C full idempotence validation.
+Update the persistent development handoff after 5B.3.10C.
 
 ## Result
 
-`5B.3.10C_FULL_IDEMPOTENCE_PASS`
+5B.3.10C is committed and pushed on `main` and `origin/main` at
+`acd4282` (documentation-only follow-up to the 5B.3.10C implementation at
+`75a2618659ca9183777862196e053ae3b79f8483`).
 
-The complete offline historical workflow passed its repeated-run idempotence
-gate. Repeated execution created no duplicate domain objects and produced the
-same domain and review results.
+The next step is a controlled 5B.3.10 production run with a fresh offline
+Shadow Gate completed before the first production mutation.
 
 ## Repository State
 
-- Development branch: `main`
-- Status branch: `codex-status`
-- `main` remains unchanged by this status update.
-- Status content is maintained only on `codex-status`, which must never be
-  merged into `main`.
+- `main` HEAD: `acd4282`
+- `origin/main`: `acd4282`
+- Main working tree was clean after the documentation commit.
+- `codex-status` remains a separate status-only branch and must never be merged
+  into `main`.
 
 ## Summary
 
-The historical import, transfer-evidence resolution, ledger transformation,
-trade transformation, and repeated-run checks completed successfully in the
-offline validation environment.
+`docs/DEVELOPMENT_STATE.md` now records the committed/pushed 5B.3.10C state
+and replaces the stale next-step text.
 
 ## Tests / Quality Gates
 
-- Full idempotence gate: PASS
-- Repeated transformation runs: PASS
-- No duplicate domain objects: PASS
-- No production services, providers, or production database were used.
+- `git diff --check`: PASS
+- Markdownlint command was unavailable in the environment.
 
 ## Data / Domain Results
 
-- Historical transfer links and resolutions remained stable across runs.
-- AcquisitionLots, DisposalEvents, FeeEvents, TradeExecutions, and
-  ValuationRequirements were unchanged by the second run.
-- Trade/ledger reconciliation remained fully matched.
+No domain or production data was changed. The documented next gate is a fresh
+offline Shadow Gate for the controlled 5B.3.10 production run.
 
 ## Safety
 
-- No production database mutation.
-- No migration, Historical Import, TaxCalculationRun, review decision, or
-  order.
-- No Kraken or other provider calls.
-- No secrets or private financial details recorded.
+- No production database access or mutation.
+- No migration, Historical Import, TaxCalculationRun, review decision, provider
+  call, or order.
 
 ## Changed Files
 
+- `docs/DEVELOPMENT_STATE.md` on `main`.
 - `CODEX_STATUS.md` on `codex-status` only.
 
 ## Git State
 
-- This report is committed and pushed only on `codex-status`.
-- `main` was not modified.
+- Main documentation commit pushed to `origin/main`.
+- This status report is committed and will be pushed only to `origin/codex-status`.
 
 ## Next Decision Required
 
-Review the full idempotence result before any further production action.
+Run the controlled 5B.3.10 production procedure only after a new fresh Shadow
+Gate passes completely; do not mutate production before that gate.

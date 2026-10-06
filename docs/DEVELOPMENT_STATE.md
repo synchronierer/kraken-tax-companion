@@ -433,13 +433,47 @@ used.
 
 ## Current next step
 
-5B.3.10C is committed and pushed on `main`/`origin/main` at
-`75a2618659ca9183777862196e053ae3b79f8483`.
+### Sprint 5B.3.10 – Controlled production historical import
 
-The next step is a controlled 5B.3.10 production run, preceded by a fresh
-offline Shadow Gate and completed before the first production mutation. No
-production migration or Historical Import may begin until that fresh Shadow
-Gate passes.
+Status: `HISTORICAL_PRODUCTION_IMPORT_PASS`.
+
+The production database was migrated from `0012_financial_review_resolution`
+to `0013_historical_transfer_evidence` and the historical import was executed
+exactly once after a fresh source-mount and shadow gate. Final counts are:
+
+- AcquisitionLots 2711, DisposalEvents 13, FeeEvents 49
+- RawImportRecords 3103, TradeExecutions 39, ValuationRequirements 2759
+- HistoricalTransferLinks 8; HistoricalTransferResolutions 8 (6 RESOLVED,
+  2 PARTIAL)
+
+Trade reconciliation was 39 MATCHED with no partial, pending, or conflicting
+matches. Historical valuation requirements are 4 external acquisitions and 6
+external fees. Four fees use original-exchange `network_fee` provenance and
+two use `manual_transfer_fee` / `manual_bookkeeping`; no buy-record fee
+provenance was created. Three deposit reviews remain active and two historical
+cost-basis gaps remain auditably recorded. No Kraken deposit was projected as a
+new acquisition at its deposit timestamp.
+
+The backend was healthy after restart and read-only smoke checks succeeded.
+TaxCalculationRuns remain 2; no new run was created. FinancialReviewResolutions
+remain 2; no automatic decision was made. No provider call, order, or other
+trading operation occurred. SQLite PRE/resume/POST backups were created with
+`sqlite3.Connection.backup()`.
+
+Production backup artifacts:
+
+- resume pre-import: `production-5b3.10/5b3.10-resume-pre-import-20261006-201500.db`
+- post-import: `production-5b3.10/5b3.10-post-import-20261006-201800.db`
+
+The next step is offline-only analysis of the three remaining unresolved
+deposit reviews:
+
+- DOGE 318.65944000
+- LTC 0.0062935900
+- BTC 0.0003000200
+
+Do not automatically decide these reviews or run another Historical Import
+without explicit authorization.
 
 ## Handoff discipline
 

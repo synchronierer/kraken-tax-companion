@@ -15,7 +15,8 @@ historical import run completed after the fresh source-mount gate passed.
 ## Repository State
 
 - Main deploy version: `acd428241a6dc724987533517938cdd597afaaed`
-- `main` and `origin/main` matched before the run.
+- Post-handoff documentation commit on `main`: `3a18ffeb0de19a3147ae03818d89cdf19502b561`
+- `main` and `origin/main` matched after the documentation push.
 - This report is maintained on `codex-status`, which must never be merged into
   `main`.
 
@@ -86,6 +87,7 @@ were not classified as fees or disposals.
 
 ## Next Decision Required
 
-Review the production import report and determine the next offline-only work on
-the remaining three historical deposit reviews. Do not perform automatic review
-decisions or another historical import without explicit authorization.
+Next step: offline-only analysis of the three remaining unresolved deposit
+reviews (DOGE 318.65944000, LTC 0.0062935900, BTC 0.0003000200). Do not
+perform automatic review decisions or another Historical Import without
+explicit authorization.

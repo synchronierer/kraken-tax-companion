@@ -11,6 +11,7 @@ from app import models
 from app.adapters.historical_sources import (
     BITCOIN_DE_SOURCE,
     BITTREX_SOURCE,
+    MANUAL_BOOKKEEPING_SOURCE,
     BitcoinDeStatementRecord,
     BittrexOrderHistoryRecord,
     parse_bitcoin_de_csv,
@@ -19,6 +20,7 @@ from app.adapters.historical_sources import (
     parse_bittrex_csv,
     parse_bittrex_order_history,
     parse_bittrex_records,
+    parse_manual_transfer_evidence,
 )
 from app.adapters.kraken import transformation as kraken_transformation
 from app.adapters.kraken.transformation import KrakenTransformationService
@@ -648,6 +650,49 @@ def test_real_export_parsers_normalize_german_and_bittrex_rows(tmp_path) -> None
     assert bittrex[2].payload["record_type"] == "sell"
 
 
+def test_manual_transfer_evidence_is_date_precise_and_deterministic(tmp_path) -> None:
+    path = tmp_path / "manual.csv"
+    path.write_text(
+        "source_document;source_document_sha256;evidence_type;transaction;asset;"
+        "amount;fee;fee_asset;date\n"
+        "ledger.ods;abc;manual_bookkeeping;Transfer;DOGE;11402.55352573;2;"
+        "DOGE;2020-12-22\n",
+        encoding="utf-8",
+    )
+    first = parse_manual_transfer_evidence(path)
+    second = parse_manual_transfer_evidence(path)
+    assert first == second
+    assert first[0].payload["record_type"] == "manual_transfer_fee"
+    assert first[0].payload["occurred_at_precision"] == "date"
+    assert first[0].technical_metadata["evidence_level"] == "manual_bookkeeping"
+    assert first[0].canonical_key.startswith(f"{MANUAL_BOOKKEEPING_SOURCE}:transfer:")
+
+
+def test_manual_transfer_evidence_rejects_non_manual_rows(tmp_path) -> None:
+    path = tmp_path / "invalid-manual.csv"
+    path.write_text(
+        "source_document;source_document_sha256;evidence_type;transaction;asset;"
+        "amount;fee;fee_asset;date\n"
+        "ledger.ods;abc;original_bittrex_export;Transfer;DOGE;1;2;DOGE;"
+        "2020-12-22\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Invalid manual transfer evidence"):
+        parse_manual_transfer_evidence(path)
+
+
+def test_manual_transfer_evidence_rejects_invalid_date(tmp_path) -> None:
+    path = tmp_path / "invalid-date.csv"
+    path.write_text(
+        "source_document;source_document_sha256;evidence_type;transaction;asset;"
+        "amount;fee;fee_asset;date\n"
+        "ledger.ods;abc;manual_bookkeeping;Transfer;DOGE;1;2;DOGE;not-a-date\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Invalid manual transfer evidence"):
+        parse_manual_transfer_evidence(path)
+
+
 def test_known_date_without_eur_cost_requires_valuation_not_gap() -> None:
     factory = database_factory()
     row = parse_bitcoin_de_statement(
@@ -683,6 +728,90 @@ def test_known_date_without_eur_cost_requires_valuation_not_gap() -> None:
         )
 
 
+def test_direct_historical_fee_projects_one_valuation_requirement_idempotently() -> (
+    None
+):
+    factory = database_factory()
+    rows = [
+        RawRecordInput(
+            payload={
+                "record_type": "network_fee",
+                "occurred_at": "2020-01-01T00:00:00+00:00",
+                "asset": "BCH",
+                "fee_quantity": "0.00000400",
+                "fee_asset": "BCH",
+            },
+            external_id="bitcoin-de:statement:FEE-1",
+            canonical_key="bitcoin-de:statement:FEE-1",
+        ),
+        RawRecordInput(
+            payload={
+                "record_type": "network_fee",
+                "occurred_at": "2021-01-01T00:00:00+00:00",
+                "asset": "BCH",
+                "fee_quantity": "0.00000400",
+                "fee_asset": "BCH",
+            },
+            external_id="bitcoin-de:statement:FEE-2",
+            canonical_key="bitcoin-de:statement:FEE-2",
+        ),
+    ]
+    source_session, _ = import_inputs(factory, BITCOIN_DE_SOURCE, rows)
+    source_ids = tuple(
+        raw_id(factory, f"bitcoin-de:statement:FEE-{index}") for index in (1, 2)
+    )
+    service = HistoricalTransferService(
+        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory), clock=lambda: NOW
+    )
+    for source_id in source_ids:
+        service.resolve(
+            source_record_ids=(source_id,),
+            canonical_asset="BCH",
+            source_quantity=Decimal("1"),
+            target_quantity=Decimal("1"),
+            transfer_nature=HistoricalTransferNature.SELF_TRANSFER,
+            basis_coverage=HistoricalBasisCoverage.COMPLETE,
+            evidence_type=BITCOIN_DE_SOURCE,
+        )
+    service.resolve(
+        source_record_ids=(source_ids[0],),
+        canonical_asset="BCH",
+        source_quantity=Decimal("1"),
+        target_quantity=Decimal("1"),
+        transfer_nature=HistoricalTransferNature.SELF_TRANSFER,
+        basis_coverage=HistoricalBasisCoverage.COMPLETE,
+        evidence_type=BITCOIN_DE_SOURCE,
+    )
+    with factory() as database:
+        assert database.scalar(select(func.count()).select_from(FeeEvent)) == 2
+        fee_events = list(database.scalars(select(FeeEvent)))
+        provenance = list(database.scalars(select(models.DomainProvenance)))
+        raw_by_fee = {
+            item.domain_object_id: database.get(
+                models.RawImportRecord, item.raw_import_record_id
+            )
+            for item in provenance
+            if item.domain_object_type == "FeeEvent"
+        }
+        assert {raw.external_id for raw in raw_by_fee.values() if raw is not None} == {
+            "bitcoin-de:statement:FEE-1",
+            "bitcoin-de:statement:FEE-2",
+        }
+        assert {event.occurred_at for event in fee_events} == {
+            datetime(2020, 1, 1, tzinfo=UTC),
+            datetime(2021, 1, 1, tzinfo=UTC),
+        }
+        requirements = list(database.scalars(select(ValuationRequirement)))
+        assert len(requirements) == 2
+        assert all(
+            item.reason_code == "historical_external_fee" for item in requirements
+        )
+        assert {item.domain_object_id for item in requirements} == {
+            item.id for item in database.scalars(select(FeeEvent))
+        }
+    del source_session
+
+
 def test_resolved_target_deposit_is_internal_without_new_kraken_lot() -> None:
     factory = database_factory()
     source = parse_bitcoin_de_statement(
@@ -696,6 +825,17 @@ def test_resolved_target_deposit_is_internal_without_new_kraken_lot() -> None:
         }
     )
     source_session, _ = import_rows(factory, BITCOIN_DE_SOURCE, [source])
+    fee_source = parse_bitcoin_de_statement(
+        {
+            "id": "SOURCE-FEE",
+            "type": "network_fee",
+            "asset": "BTC",
+            "fee": "0.01",
+            "fee_asset": "BTC",
+            "date": "2020-12-31T00:00:00Z",
+        }
+    )
+    fee_session, _ = import_rows(factory, BITCOIN_DE_SOURCE, [fee_source])
     target = RawRecordInput(
         payload={
             "txid": "TARGET-DEPOSIT",
@@ -720,6 +860,7 @@ def test_resolved_target_deposit_is_internal_without_new_kraken_lot() -> None:
     )
     target_session, _ = import_inputs(factory, "kraken-ledgers", [target])
     source_id = raw_id(factory, "bitcoin-de:statement:SOURCE-BUY")
+    fee_source_id = raw_id(factory, "bitcoin-de:statement:SOURCE-FEE")
     target_id = raw_id(factory, "kraken:ledger:TARGET-DEPOSIT")
     with factory() as database:
         target_hash = database.get(models.RawImportRecord, target_id).content_hash
@@ -737,12 +878,13 @@ def test_resolved_target_deposit_is_internal_without_new_kraken_lot() -> None:
         target_fingerprint=target_hash,
         source_fee_quantity=Decimal("0.01"),
         source_fee_asset="BTC",
+        fee_source_record_id=fee_source_id,
     )
     result = KrakenTransformationService(
         unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(factory), clock=lambda: NOW
     ).transform(
         import_session_ids=(target_session,),
-        context_import_session_ids=(source_session,),
+        context_import_session_ids=(source_session, fee_session),
         actor_id="test-suite",
     )
     assert result.review_cases == 0
@@ -751,6 +893,22 @@ def test_resolved_target_deposit_is_internal_without_new_kraken_lot() -> None:
         assert decisions[-1].reason_code == "ledger_historical_self_transfer_resolved"
         assert database.scalar(select(func.count()).select_from(AcquisitionLot)) == 1
         assert database.scalar(select(func.count()).select_from(FeeEvent)) == 1
+        fee_event = database.scalars(select(FeeEvent)).one()
+        fee_provenance = database.scalars(
+            select(models.DomainProvenance).where(
+                models.DomainProvenance.domain_object_type == "FeeEvent",
+                models.DomainProvenance.domain_object_id == fee_event.id,
+            )
+        ).one()
+        fee_raw = database.get(
+            models.RawImportRecord, fee_provenance.raw_import_record_id
+        )
+        assert fee_raw is not None
+        assert fee_raw.external_id == "bitcoin-de:statement:SOURCE-FEE"
+        assert fee_event.occurred_at == datetime(2020, 12, 31, tzinfo=UTC)
+        assert (
+            database.scalar(select(func.count()).select_from(ValuationRequirement)) == 1
+        )
 
 
 def test_historical_resolution_rejects_target_mismatch_and_bad_quantities() -> None:

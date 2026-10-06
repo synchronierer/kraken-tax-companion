@@ -51,6 +51,8 @@ The offline source set consists of the following purposes only:
 - `kraken-trade-history-full.json`: complete TradesHistory snapshot;
 - pristine historical sandbox database bases;
 - a sandbox working directory for SQLite-backup-derived copies.
+- `bittrex-manual-transfer-evidence.csv`: explicitly labeled manual bookkeeping
+  evidence for the two historical Bittrex transfer fees.
 
 The file previously named
 `/home/lo/Backups/kraken-tax-companion/historical-sandbox-base.db` is no longer
@@ -353,10 +355,87 @@ Active review cases are fachlich idempotent; historical run issues remain
 append-only. No production migration, Historical Import, TaxCalculationRun,
 automatic review decision, provider access, or order was performed.
 
+## Sprint 5B.3.10B – Direct historical fee valuation
+
+The 5B.3.10 production-import attempt was safely stopped before any
+production mutation. Its shadow validation found 2756 instead of the expected
+2759 valuation requirements. The cause was that direct historical fees created
+their `FeeEvent` without the corresponding `ValuationRequirement`, while the
+`source_fee_quantity` path did create one.
+
+5B.3.10B centralizes historical fee projection in `_project_fee()`. Every
+historical FeeEvent requiring valuation now receives exactly one
+`historical_external_fee` ValuationRequirement, regardless of whether it came
+from a source fee quantity or a direct fee record. Existing FeeEvent and
+ValuationRequirement identities are reused, so repeated projection is
+idempotent. No EUR value is invented and no FeeEvent is converted into a
+DisposalEvent.
+
+The focused direct-fee tests cover missing EUR valuation, repeated identical
+fees, distinct equal BCH fees, and the existing source-fee path. The full
+backend suite passed with 668 tests and 100% coverage; Ruff, Black, Mypy,
+Markdownlint, Docker Compose validation, and `git diff --check` passed.
+
+A fresh SQLite-backup shadow copy was used at
+`/home/lo/Backups/kraken-tax-companion/production-5b3.10/5b3.10b-dry-run-work.db`.
+The complete offline process produced AcquisitionLots 2711, DisposalEvents
+13, FeeEvents 49, RawImportRecords 3101, TradeExecutions 39, and
+ValuationRequirements 2759. External projection contributed 18 AcquisitionLots,
+6 FeeEvents, 4 historical acquisition requirements, and 6 historical fee
+requirements. All six historical fee events have exactly one linked valuation
+requirement. The second identical run left all domain counts unchanged.
+
+Historical transfer resolutions remain 8/8 (6 resolved, 2 partial), with eight
+resolved self-transfer decisions and three unresolved deposit reviews. The two
+cost-basis gaps remain DOGE 118.19411945 and LTC 0.00406235. Transport
+differentials remain informational and are not projected as fees or disposals.
+Production remains unchanged; no production migration or Historical Import was
+performed.
+
+The subsequent provenance audit failed 5B.3.10B: the six FeeEvents had the
+correct counts and valuation links, but their `DomainProvenance` pointed to
+acquisition/buy RawImportRecords (and source-fee projection timestamps) rather
+than to the fee-bearing source records. Production remains blocked.
+
+## Sprint 5B.3.10C – Source-true historical fee provenance
+
+5B.3.10C corrects the provenance without a schema migration. Historical fee
+projection now receives an explicit fee source RawImportRecord instead of
+implicitly selecting the first acquisition source record. Bitcoin.de
+`network_fee` records therefore provide the FeeEvent identity, timestamp, and
+provenance. The four direct Bitcoin.de fees remain distinct, including the two
+equal BCH amounts.
+
+The two Bittrex withdrawal fees are sourced from the separate
+`historical-manual-bookkeeping` import of the supplied manual evidence CSV.
+The Bittrex OrderHistory remains the acquisition source. Manual evidence stores
+the source document hash, `manual_bookkeeping` evidence level, and
+`occurred_at_precision=date`; the technical UTC midnight normalization is not
+treated as an exact historical time.
+
+The fresh offline shadow gate used a new SQLite-backup-derived copy of the
+pristine 5B.3.10 baseline with networking disabled. External source import
+accepted 54 records (52 original exchange records plus 2 manual bookkeeping
+records), with no rejections. Final counts were AcquisitionLots 2711,
+DisposalEvents 13, FeeEvents 49, RawImportRecords 3103, TradeExecutions 39,
+and ValuationRequirements 2759. Historical transfer links/resolutions remain
+8/8 (6 resolved, 2 partial), with three active deposit reviews and two
+historical cost-basis gaps.
+
+The provenance gate passed: four FeeEvents point to Bitcoin.de `network_fee`
+records with original-source evidence, and two point to manual-bookkeeping
+records. Every FeeEvent has exactly one `historical_external_fee`
+ValuationRequirement. A second identical import/projection reused all 54
+external records, 3006 ledger records, and 39 trades; all domain counts and
+fee requirements remained unchanged. No production database, migration,
+Historical Import, TaxCalculationRun, review decision, provider, or order was
+used.
+
 ## Current next step
 
-5B.3.9B is implemented and validated offline. Review the diff before any
-commit, deployment, production migration, or production Historical Import.
+5B.3.10C is implemented and source-provenance validated offline. Review the
+uncommitted diff before any deployment, production migration, or production
+Historical Import.
 
 ## Handoff discipline
 

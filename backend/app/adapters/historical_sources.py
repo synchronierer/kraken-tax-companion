@@ -16,6 +16,7 @@ from app.imports.service import RawRecordInput
 
 BITCOIN_DE_SOURCE = "bitcoin-de-account-statement"
 BITTREX_SOURCE = "bittrex-order-history"
+MANUAL_BOOKKEEPING_SOURCE = "historical-manual-bookkeeping"
 HISTORICAL_SOURCE_VERSION = "historical-source-v1"
 
 
@@ -337,3 +338,122 @@ def parse_bittrex_csv(path: str | Path) -> list[RawRecordInput]:
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         rows = csv.DictReader(handle)
         return parse_bittrex_records([_bittrex_csv_row(row) for row in rows])
+
+
+@dataclass(frozen=True, kw_only=True)
+class ManualTransferEvidenceRecord:
+    source_document: str
+    source_document_sha256: str
+    evidence_type: str
+    transaction: str
+    asset: str
+    amount: Decimal
+    fee: Decimal
+    fee_asset: str
+    source_date: str
+
+    @property
+    def source_id(self) -> str:
+        return canonical_sha256(
+            {
+                "source_document": self.source_document,
+                "source_document_sha256": self.source_document_sha256,
+                "evidence_type": self.evidence_type,
+                "transaction": self.transaction,
+                "asset": self.asset,
+                "amount": str(self.amount),
+                "fee": str(self.fee),
+                "fee_asset": self.fee_asset,
+                "source_date": self.source_date,
+            }
+        )
+
+    @property
+    def canonical_key(self) -> str:
+        return f"historical-manual-bookkeeping:transfer:{self.source_id}"
+
+    def transformation_payload(self) -> dict[str, str]:
+        return {
+            "record_type": "manual_transfer_fee",
+            "occurred_at": f"{self.source_date}T00:00:00+00:00",
+            "occurred_at_precision": "date",
+            "source_document": self.source_document,
+            "source_document_sha256": self.source_document_sha256,
+            "evidence_type": self.evidence_type,
+            "transaction": self.transaction,
+            "asset": self.asset,
+            "transfer_amount": str(self.amount),
+            "fee_quantity": str(self.fee),
+            "fee_asset": self.fee_asset,
+            "source_date": self.source_date,
+        }
+
+    def raw_record(self) -> RawRecordInput:
+        payload = self.transformation_payload()
+        return RawRecordInput(
+            payload=payload,
+            external_id=self.canonical_key,
+            canonical_key=self.canonical_key,
+            technical_metadata={
+                "source_kind": MANUAL_BOOKKEEPING_SOURCE,
+                "normalization_version": HISTORICAL_SOURCE_VERSION,
+                "evidence_level": "manual_bookkeeping",
+                "source_document": self.source_document,
+                "source_document_sha256": self.source_document_sha256,
+                "source_precision": "date",
+                "canonical_fingerprint": canonical_sha256(payload),
+            },
+        )
+
+
+def parse_manual_transfer_evidence(
+    path: str | Path,
+) -> list[RawRecordInput]:
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = csv.DictReader(handle, delimiter=";")
+        result: list[RawRecordInput] = []
+        for row in rows:
+            source_document = _text(row.get("source_document"))
+            source_hash = _text(row.get("source_document_sha256"))
+            evidence_type = _text(row.get("evidence_type"))
+            transaction = _text(row.get("transaction"))
+            asset = _text(row.get("asset")).upper()
+            source_date = _text(row.get("date"))
+            amount = _decimal(row.get("amount"))
+            fee = _decimal(row.get("fee"))
+            fee_asset = _text(row.get("fee_asset")).upper()
+            valid_date = False
+            try:
+                datetime.strptime(source_date, "%Y-%m-%d")
+                valid_date = True
+            except ValueError:
+                pass
+            if (
+                not source_document
+                or not source_hash
+                or evidence_type != "manual_bookkeeping"
+                or not transaction
+                or not asset
+                or amount is None
+                or amount <= 0
+                or fee is None
+                or fee <= 0
+                or not fee_asset
+                or not source_date
+                or not valid_date
+            ):
+                raise ValueError("Invalid manual transfer evidence row")
+            result.append(
+                ManualTransferEvidenceRecord(
+                    source_document=source_document,
+                    source_document_sha256=source_hash,
+                    evidence_type=evidence_type,
+                    transaction=transaction,
+                    asset=asset,
+                    amount=amount,
+                    fee=fee,
+                    fee_asset=fee_asset,
+                    source_date=source_date,
+                ).raw_record()
+            )
+        return result

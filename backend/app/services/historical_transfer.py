@@ -93,6 +93,7 @@ class HistoricalTransferService:
         target_fingerprint: str | None = None,
         source_fee_quantity: Decimal = Decimal("0"),
         source_fee_asset: str | None = None,
+        fee_source_record_id: UUID | None = None,
         parent_link_id: UUID | None = None,
         explanation: str = "Historical source evidence recorded.",
         evidence_level: str = "original_exchange",
@@ -112,6 +113,7 @@ class HistoricalTransferService:
             "evidence_type": evidence_type,
             "source_fee_quantity": str(source_fee_quantity),
             "source_fee_asset": source_fee_asset or "",
+            "fee_source_record_id": str(fee_source_record_id or ""),
         }
         stable_key = f"historical-transfer:{canonical_sha256(identity)}"
         evidence_hash = _hash_payload(identity)
@@ -189,6 +191,7 @@ class HistoricalTransferService:
                     source_record_ids=source_record_ids,
                     link=link,
                     now=now,
+                    fee_source_record_id=fee_source_record_id,
                 )
                 unit.commit()
             else:
@@ -203,6 +206,7 @@ class HistoricalTransferService:
         source_record_ids: Sequence[str | UUID],
         link: HistoricalTransferLink,
         now: datetime,
+        fee_source_record_id: UUID | None,
     ) -> None:
         projected_quantity = Decimal("0")
         for raw_id in source_record_ids:
@@ -218,7 +222,11 @@ class HistoricalTransferService:
             record_type = str(payload.get("record_type", "")).lower()
             occurred_at = _timestamp(payload)
             if record_type not in {"buy", "acquisition", "partner_program"}:
-                if record_type in {"network_fee", "withdrawal"}:
+                if record_type in {
+                    "network_fee",
+                    "withdrawal",
+                    "manual_transfer_fee",
+                }:
                     self._project_direct_fee(
                         unit=unit,
                         run=run,
@@ -313,57 +321,30 @@ class HistoricalTransferService:
                 now=now,
             )
         if link.source_fee_quantity > 0 and link.source_fee_asset:
-            fee_key = f"historical-transfer-fee:{link.stable_key}"
-            if unit.fee_events.find_by_stable_key(fee_key) is None:
-                source_record = next(
-                    (
-                        unit.raw_imports.get(
-                            raw_id if isinstance(raw_id, UUID) else UUID(raw_id)
+            fee_source_record = (
+                unit.raw_imports.get(fee_source_record_id)
+                if fee_source_record_id is not None
+                else None
+            )
+            if fee_source_record is not None:
+                self._project_fee(
+                    unit=unit,
+                    run=run,
+                    raw_record=fee_source_record,
+                    fee=link.source_fee_quantity,
+                    fee_asset=link.source_fee_asset,
+                    occurred_at=(
+                        _timestamp(
+                            {
+                                str(key): value
+                                for key, value in fee_source_record.payload.items()
+                            }
                         )
-                        for raw_id in source_record_ids
-                        if _raw_uuid(raw_id) is not None
+                        or fee_source_record.created_at
                     ),
-                    None,
+                    related_object_id=link.id,
+                    now=now,
                 )
-                if source_record is not None:
-                    fee_event = FeeEvent(
-                        stable_key=fee_key,
-                        payload_hash=link.evidence_hash,
-                        asset_code=link.source_fee_asset,
-                        quantity=link.source_fee_quantity,
-                        occurred_at=source_record.created_at,
-                        provider=source_record.source,
-                        external_id=fee_key,
-                        transformation_version=HISTORICAL_TRANSFER_VERSION,
-                        valuation_status=ValuationStatus.VALUATION_REQUIRED,
-                        related_object_id=link.id,
-                        created_at=now,
-                    )
-                    unit.fee_events.add(fee_event)
-                    run.created_objects += 1
-                    unit.domain_provenance.add(
-                        DomainProvenance(
-                            domain_object_type="FeeEvent",
-                            domain_object_id=fee_event.id,
-                            raw_import_record_id=source_record.id,
-                            import_session_id=source_record.import_session_id,
-                            transformation_run_id=run.id,
-                        )
-                    )
-                    unit.valuation_requirements.add(
-                        ValuationRequirement(
-                            asset_code=fee_event.asset_code,
-                            target_currency="EUR",
-                            valuation_at=fee_event.occurred_at,
-                            method=ValuationMethod.DAILY_AVERAGE,
-                            status=ValuationStatus.VALUATION_REQUIRED,
-                            reason_code="historical_external_fee",
-                            domain_object_type="FeeEvent",
-                            domain_object_id=fee_event.id,
-                            transformation_run_id=run.id,
-                            created_at=now,
-                        )
-                    )
         if projected_quantity > 0 and projected_quantity < link.source_quantity:
             self._gap(
                 unit,
@@ -415,22 +396,26 @@ class HistoricalTransferService:
         occurred_at: datetime,
         related_object_id: UUID,
         now: datetime,
+        stable_key: str | None = None,
     ) -> None:
-        fee_key = f"historical-fee:{raw_record.external_id or raw_record.id}"
-        fee_event = FeeEvent(
-            stable_key=fee_key,
-            payload_hash=raw_record.content_hash,
-            asset_code=fee_asset,
-            quantity=fee,
-            occurred_at=occurred_at,
-            provider=raw_record.source,
-            external_id=raw_record.external_id or str(raw_record.id),
-            transformation_version=HISTORICAL_TRANSFER_VERSION,
-            valuation_status=ValuationStatus.VALUATION_REQUIRED,
-            related_object_id=related_object_id,
-            created_at=now,
+        fee_key = (
+            stable_key or f"historical-fee:{raw_record.external_id or raw_record.id}"
         )
-        if unit.fee_events.find_by_stable_key(fee_key) is None:
+        fee_event = unit.fee_events.find_by_stable_key(fee_key)
+        if fee_event is None:
+            fee_event = FeeEvent(
+                stable_key=fee_key,
+                payload_hash=raw_record.content_hash,
+                asset_code=fee_asset,
+                quantity=fee,
+                occurred_at=occurred_at,
+                provider=raw_record.source,
+                external_id=raw_record.external_id or str(raw_record.id),
+                transformation_version=HISTORICAL_TRANSFER_VERSION,
+                valuation_status=ValuationStatus.VALUATION_REQUIRED,
+                related_object_id=related_object_id,
+                created_at=now,
+            )
             unit.fee_events.add(fee_event)
             run.created_objects += 1
             unit.domain_provenance.add(
@@ -440,6 +425,28 @@ class HistoricalTransferService:
                     raw_import_record_id=raw_record.id,
                     import_session_id=raw_record.import_session_id,
                     transformation_run_id=run.id,
+                )
+            )
+        if (
+            fee_event.valuation_status is ValuationStatus.VALUATION_REQUIRED
+            and not any(
+                requirement.domain_object_type == "FeeEvent"
+                and requirement.domain_object_id == fee_event.id
+                for requirement in unit.valuation_requirements.list()
+            )
+        ):
+            unit.valuation_requirements.add(
+                ValuationRequirement(
+                    asset_code=fee_event.asset_code,
+                    target_currency="EUR",
+                    valuation_at=fee_event.occurred_at,
+                    method=ValuationMethod.DAILY_AVERAGE,
+                    status=ValuationStatus.VALUATION_REQUIRED,
+                    reason_code="historical_external_fee",
+                    domain_object_type="FeeEvent",
+                    domain_object_id=fee_event.id,
+                    transformation_run_id=run.id,
+                    created_at=now,
                 )
             )
 

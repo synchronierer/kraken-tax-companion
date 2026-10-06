@@ -2,57 +2,70 @@
 
 ## Task
 
-Update the persistent development handoff after 5B.3.10C.
+Controlled Sprint 5B.3.10 production historical import.
 
 ## Result
 
-5B.3.10C is committed and pushed on `main` and `origin/main` at
-`acd4282` (documentation-only follow-up to the 5B.3.10C implementation at
-`75a2618659ca9183777862196e053ae3b79f8483`).
+`HISTORICAL_PRODUCTION_IMPORT_STOPPED_WRITERS_OFF`
 
-The next step is a controlled 5B.3.10 production run with a fresh offline
-Shadow Gate completed before the first production mutation.
+The fresh PRE baseline and Shadow Gate passed. Migration `0012 -> 0013` was
+performed in production. The subsequent import attempt stopped immediately
+because the maintenance container was missing the mounted offline source
+directories. No historical source records or domain projections were imported.
 
 ## Repository State
 
-- `main` HEAD: `acd4282`
-- `origin/main`: `acd4282`
-- Main working tree was clean after the documentation commit.
-- `codex-status` remains a separate status-only branch and must never be merged
-  into `main`.
+- `main` and `origin/main`: `acd428241a6dc724987533517938cdd597afaaed`
+- Main working tree was clean before this status-only update.
+- `codex-status` is separate and must never be merged into `main`.
 
 ## Summary
 
-`docs/DEVELOPMENT_STATE.md` now records the committed/pushed 5B.3.10C state
-and replaces the stale next-step text.
+Fresh Shadow Gate passed with 54 external evidence records, 39 matched trades,
+8 historical transfer links/resolutions, 2,711 AcquisitionLots, 49 FeeEvents,
+and 2,759 ValuationRequirements. Production migration succeeded and preserved
+all pre-migration domain data. The production import was then halted before
+any source import or transformation due to a missing source mount.
 
 ## Tests / Quality Gates
 
-- `git diff --check`: PASS
-- Markdownlint command was unavailable in the environment.
+- Fresh PRE backup integrity: PASS
+- Fresh Shadow Gate: PASS
+- Production migration integrity: PASS
+- Production import: NOT COMPLETED; stopped safely
+- Failed-state backup integrity: PASS
 
 ## Data / Domain Results
 
-No domain or production data was changed. The documented next gate is a fresh
-offline Shadow Gate for the controlled 5B.3.10 production run.
+Post-failure production state is migration-only:
+
+- Revision: `0013_historical_transfer_evidence`
+- Existing domain counts remain at the pre-import baseline
+- HistoricalTransferLinks: 0
+- HistoricalTransferResolutions: 0
+- No historical source, ledger, or trade records were added
 
 ## Safety
 
-- No production database access or mutation.
-- No migration, Historical Import, TaxCalculationRun, review decision, provider
-  call, or order.
+- Backend writer remains stopped.
+- Failed-state backup created with SQLite `Connection.backup()`:
+  `production-5b3.10/5b3.10-failed-20261006-201000.db`
+- No restore or ad-hoc repair was attempted.
+- No TaxCalculationRun, review decision, provider call, or order occurred.
 
 ## Changed Files
 
-- `docs/DEVELOPMENT_STATE.md` on `main`.
 - `CODEX_STATUS.md` on `codex-status` only.
+- No project code or main-branch documentation changed.
 
 ## Git State
 
-- Main documentation commit pushed to `origin/main`.
-- This status report is committed and will be pushed only to `origin/codex-status`.
+- Status report will be committed and pushed only to `origin/codex-status`.
+- `main` was not modified.
 
 ## Next Decision Required
 
-Run the controlled 5B.3.10 production procedure only after a new fresh Shadow
-Gate passes completely; do not mutate production before that gate.
+Do not restart the backend or resume the import automatically. Review the
+failed production state and the PRE-WRITE/failed backups, then decide on a
+controlled recovery or continuation procedure with all offline source mounts
+verified before any further production mutation.

@@ -201,15 +201,22 @@ class TransformationIssue:
         object.__setattr__(self, "occurred_at", require_utc(self.occurred_at))
 
 
+# Cost-basis gaps are unresolved evidence, not a classification review for the
+# raw record.  They remain active until the missing basis is independently
+# supplied, even when the transfer itself receives a non-reviewing decision.
+_PERSISTENT_AUDIT_ISSUE_CODES = frozenset({"historical_cost_basis_gap"})
+
+
 def active_transformation_issues(
     issues: Iterable[TransformationIssue],
     runs: Mapping[UUID, TransformationRun],
+    decisions: Iterable[TransformationDecision] = (),
 ) -> tuple[TransformationIssue, ...]:
     """Project run-scoped issues onto stable active review identities.
 
     Transformation issues remain append-only run history.  This projection
-    selects one deterministic representative for each raw-record/code pair;
-    callers still decide whether a raw record is resolved.
+    selects one deterministic representative for each raw-record/code pair and
+    suppresses issues superseded by a later non-reviewing decision.
     """
     representatives: dict[tuple[UUID, str], TransformationIssue] = {}
 
@@ -225,9 +232,53 @@ def active_transformation_issues(
         current = representatives.get(key)
         if current is None or rank(issue) > rank(current):
             representatives[key] = issue
+    latest_decisions: dict[UUID, TransformationDecision] = {}
+
+    def decision_rank(
+        decision: TransformationDecision,
+    ) -> tuple[datetime, datetime, str, bool]:
+        run = runs.get(decision.transformation_run_id)
+        run_started_at = (
+            run.started_at if run is not None else datetime.min.replace(tzinfo=UTC)
+        )
+        return (
+            run_started_at,
+            decision.decided_at,
+            str(decision.id),
+            run is not None,
+        )
+
+    for decision in decisions:
+        current = latest_decisions.get(decision.raw_import_record_id)
+        if current is None or decision_rank(decision) > decision_rank(current):
+            latest_decisions[decision.raw_import_record_id] = decision
+
+    active = []
+    for issue in representatives.values():
+        decision = latest_decisions.get(issue.raw_import_record_id)
+        if decision is None:
+            active.append(issue)
+            continue
+        if issue.code in _PERSISTENT_AUDIT_ISSUE_CODES:
+            active.append(issue)
+            continue
+        if decision.transformation_run_id not in runs:
+            # Missing run provenance cannot safely supersede an issue.
+            active.append(issue)
+            continue
+        if (
+            decision.decision_type
+            in {
+                DecisionType.REVIEW_REQUIRED,
+                DecisionType.CONFLICT,
+            }
+            and issue.code == decision.reason_code
+        ):
+            active.append(issue)
+
     return tuple(
         sorted(
-            representatives.values(),
+            active,
             key=lambda issue: (issue.occurred_at, str(issue.id)),
             reverse=True,
         )

@@ -19,6 +19,7 @@ from app.core.financial_review import (
 from app.core.time import utc_now
 from app.core.transformation import (
     DomainProvenance,
+    TransformationDecision,
     TransformationIssue,
     TransformationRun,
     active_transformation_issues,
@@ -103,7 +104,8 @@ def _linked_records(
 def _active_issues(db: Session) -> tuple[TransformationIssue, ...]:
     issues = list(db.scalars(select(TransformationIssue)))
     runs = {run.id: run for run in db.scalars(select(TransformationRun))}
-    return active_transformation_issues(issues, runs)
+    decisions = list(db.scalars(select(TransformationDecision)))
+    return active_transformation_issues(issues, runs, decisions)
 
 
 def _resolution_row(db: Session, item: FinancialReviewResolution) -> dict[str, Any]:

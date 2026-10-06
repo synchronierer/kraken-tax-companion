@@ -7,6 +7,7 @@ from sqlalchemy.sql.selectable import FromClause
 from app.core.entities import ImportSession
 from app.core.financial_review import FinancialReviewRecordLink
 from app.core.transformation import (
+    TransformationDecision,
     TransformationIssue,
     TransformationRun,
     active_transformation_issues,
@@ -55,6 +56,7 @@ class SqlAlchemyDashboardQueries:
         active_issues = active_transformation_issues(
             self._session.scalars(select(TransformationIssue)),
             {run.id: run for run in self._session.scalars(select(TransformationRun))},
+            self._session.scalars(select(TransformationDecision)),
         )
         resolved_raw_ids = {
             link.raw_import_record_id

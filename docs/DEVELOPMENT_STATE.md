@@ -433,47 +433,30 @@ used.
 
 ## Current next step
 
-### Sprint 5B.3.10 – Controlled production historical import
+### Sprint 5B.3.11C / 5B.3.11D – User-attestation apply and review projection
 
-Status: `HISTORICAL_PRODUCTION_IMPORT_PASS`.
+5B.3.11C applied the three previously validated user-attestation records once.
+The structural data apply succeeded (RawImportRecords 3106, HistoricalTransfer
+Links 11, HistoricalTransferResolutions 11 with 6 resolved and 5 partial;
+central domain counts unchanged). The production smoke gate then exposed an
+active-review projection bug, so the backend remains stopped and no rollback,
+reimport, or repair was performed.
 
-The production database was migrated from `0012_financial_review_resolution`
-to `0013_historical_transfer_evidence` and the historical import was executed
-exactly once after a fresh source-mount and shadow gate. Final counts are:
+5B.3.11D implements the general latest-TransformationDecision supersession
+rule in the core active-review projection and all consumers. A latest
+review/conflict decision keeps only its matching current issue; a latest
+non-reviewing decision suppresses historical review issues for that raw record.
+Missing run provenance fails safe. `historical_cost_basis_gap` remains an
+independent active audit gap until its evidence is supplied.
 
-- AcquisitionLots 2711, DisposalEvents 13, FeeEvents 49
-- RawImportRecords 3103, TradeExecutions 39, ValuationRequirements 2759
-- HistoricalTransferLinks 8; HistoricalTransferResolutions 8 (6 RESOLVED,
-  2 PARTIAL)
+The offline gate against the failed-state backup passed: active deposit reviews
+project to 0, active cost-basis gaps remain 5, and the structural counts remain
+unchanged. Production itself was not changed by 5B.3.11D, and the backend must
+remain stopped until this change is reviewed and separately deployed.
 
-Trade reconciliation was 39 MATCHED with no partial, pending, or conflicting
-matches. Historical valuation requirements are 4 external acquisitions and 6
-external fees. Four fees use original-exchange `network_fee` provenance and
-two use `manual_transfer_fee` / `manual_bookkeeping`; no buy-record fee
-provenance was created. Three deposit reviews remain active and two historical
-cost-basis gaps remain auditably recorded. No Kraken deposit was projected as a
-new acquisition at its deposit timestamp.
-
-The backend was healthy after restart and read-only smoke checks succeeded.
-TaxCalculationRuns remain 2; no new run was created. FinancialReviewResolutions
-remain 2; no automatic decision was made. No provider call, order, or other
-trading operation occurred. SQLite PRE/resume/POST backups were created with
-`sqlite3.Connection.backup()`.
-
-Production backup artifacts:
-
-- resume pre-import: `production-5b3.10/5b3.10-resume-pre-import-20261006-201500.db`
-- post-import: `production-5b3.10/5b3.10-post-import-20261006-201800.db`
-
-The next step is offline-only analysis of the three remaining unresolved
-deposit reviews:
-
-- DOGE 318.65944000
-- LTC 0.0062935900
-- BTC 0.0003000200
-
-Do not automatically decide these reviews or run another Historical Import
-without explicit authorization.
+Next step: review the code/test diff and authorize a controlled deployment of
+the projection fix only. Do not rerun the attestation import, start a
+TaxCalculationRun, or make a FinancialReviewResolution automatically.
 
 ## Handoff discipline
 

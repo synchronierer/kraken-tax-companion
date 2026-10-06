@@ -1838,6 +1838,7 @@ def reviews(db: Db, offset: Offset = 0, limit: Limit = 100) -> dict[str, Any]:
     active_issues = active_transformation_issues(
         list_entities(db, TransformationIssue),
         {run.id: run for run in list_entities(db, TransformationRun)},
+        list_entities(db, TransformationDecision),
     )
     rows = [
         {

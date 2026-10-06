@@ -433,9 +433,13 @@ used.
 
 ## Current next step
 
-5B.3.10C is implemented and source-provenance validated offline. Review the
-uncommitted diff before any deployment, production migration, or production
-Historical Import.
+5B.3.10C is committed and pushed on `main`/`origin/main` at
+`75a2618659ca9183777862196e053ae3b79f8483`.
+
+The next step is a controlled 5B.3.10 production run, preceded by a fresh
+offline Shadow Gate and completed before the first production mutation. No
+production migration or Historical Import may begin until that fresh Shadow
+Gate passes.
 
 ## Handoff discipline
 

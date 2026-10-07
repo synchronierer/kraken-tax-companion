@@ -1,5 +1,57 @@
 # Codex Status
 
+## Sprint 5B.3.11E – Controlled production deploy
+
+Deployment completed successfully.
+
+- Deployed code SHA: `93271e0fad88fbba943d46acad90db12a6030453`
+- Final main/origin-main SHA after required documentation update:
+  `2a48f68d033d4a5ffbd4d51b535d1e129b242ae7`
+- Main fast-forwarded from `3a18ffeb0de19a3147ae03818d89cdf19502b561`.
+- GitHub Actions Backend for deployed SHA: SUCCESS
+  (`37605443169`)
+- GitHub Actions Documentation for final main SHA: SUCCESS
+  (`37606166678`)
+
+The production preflight confirmed revision
+`0013_historical_transfer_evidence`. A fresh SQLite `Connection.backup()` was
+created at:
+
+`/home/lo/Backups/kraken-tax-companion/production-5b3.11/5b.3.11e-pre-deploy-20261007-121241.db`
+
+SHA-256:
+`715d9fb423c20139c9b14b8b58bbf1e357988089431592b5cfd7809d2394db3f`
+
+The backend was built from the approved main code and started without any
+migration, import, transformation, TaxCalculationRun, FinancialReviewResolution,
+provider call, or order. Health and read-only smoke checks passed; the backend
+container is healthy and the frontend is reachable.
+
+Post-deploy backup, also made with `Connection.backup()`, was:
+
+`/home/lo/Backups/kraken-tax-companion/production-5b3.11/5b.3.11e-post-deploy-121428.db`
+
+SHA-256 is identical to the pre-deploy backup:
+`715d9fb423c20139c9b14b8b58bbf1e357988089431592b5cfd7809d2394db3f`.
+Both integrity checks returned `ok`.
+
+Final production counts are unchanged:
+
+- RawImportRecords: 3106
+- HistoricalTransferLinks / Resolutions: 11 / 11
+- Resolution statuses: 6 RESOLVED, 5 PARTIAL
+- AcquisitionLots / DisposalEvents / FeeEvents / TradeExecutions: 2711 / 13 / 49 / 39
+- ValuationRequirements: 2759
+- FinancialReviewResolutions / TaxCalculationRuns: 2 / 2
+
+The projection now reports zero active `ledger_deposit_requires_review` cases
+and five active `historical_cost_basis_gap` cases. Other existing review cases
+remain visible. No database repair or write-side operation was performed.
+
+Production data was not changed fachlich; only the approved read-side
+projection code was deployed. The backend remains free of any import or
+transformation repair process.
+
 ## Sprint 5B.3.11D – Final CI portability pass
 
 Final review HEAD:

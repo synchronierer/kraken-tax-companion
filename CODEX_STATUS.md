@@ -1,5 +1,40 @@
 # Codex Status
 
+## Sprint 5B.3.11D – Final Mypy cleanup status
+
+The requested local type-checking fix was applied and pushed to the review
+branch at final HEAD:
+
+`c96124d190f9288bf71737deb9bf53693306dcf2`
+
+It changes only local variable names in
+`backend/app/core/transformation.py`: `current_decision` and
+`latest_decision` prevent Mypy from conflating `TransformationIssue` and
+`TransformationDecision`. No business logic, ordering, or persistent-gap
+semantics changed.
+
+Local focused tests (27), the complete backend suite (682), 100% coverage,
+Ruff, Black, Mypy, Markdownlint, Docker Compose validation, and diff checking
+all passed.
+
+The new GitHub Actions Backend run for this HEAD is **FAILURE**, so the review
+must not merge. Both failures are in existing migration tests: CI invokes
+`pytest backend` from the repository root, while those tests construct
+`Config("alembic.ini")`; Alembic consequently reports `No
+'script_location' key found in configuration.` The two failures are:
+
+- `test_domain_migration_up_and_down`
+- `test_export_format_migration_backfills_legacy_runs`
+
+The workflow still reached 100% coverage and reported 680 passed, but exited
+non-zero. No Documentation workflow run was triggered for `c96124d` because
+that commit contains no documentation-path change; the prior Documentation
+run for the review branch at `58b9240` succeeded. This is not sufficient to
+claim the requested two SUCCESS checks for the new HEAD.
+
+Per instruction, work stops here; no CI/workflow or unrelated production fix
+is added.
+
 ## Sprint 5B.3.11D – Review hardening cleanup
 
 The review branch `review/5b.3.11d-active-review-supersession` is complete.

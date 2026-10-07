@@ -433,14 +433,12 @@ used.
 
 ## Current next step
 
-### Sprint 5B.3.11C / 5B.3.11D – User-attestation apply and review projection
+### Sprint 5B.3.11C / 5B.3.11D / 5B.3.11E – Production projection deploy
 
 5B.3.11C applied the three previously validated user-attestation records once.
 The structural data apply succeeded (RawImportRecords 3106, HistoricalTransfer
 Links 11, HistoricalTransferResolutions 11 with 6 resolved and 5 partial;
-central domain counts unchanged). The production smoke gate then exposed an
-active-review projection bug, so the backend remains stopped and no rollback,
-reimport, or repair was performed.
+central domain counts unchanged).
 
 5B.3.11D implements the general latest-TransformationDecision supersession
 rule in the core active-review projection and all consumers. A latest
@@ -451,8 +449,7 @@ independent active audit gap until its evidence is supplied.
 
 The offline gate against the failed-state backup passed: active deposit reviews
 project to 0, active cost-basis gaps remain 5, and the structural counts remain
-unchanged. Production itself was not changed by 5B.3.11D, and the backend must
-remain stopped until this change is reviewed and separately deployed.
+unchanged.
 
 5B.3.11D review hardening adds regression coverage for same-code review
 supersession, conflict and domain-event decisions, independent raw records,
@@ -466,10 +463,25 @@ separate active-projection semantics for deactivating that gap after a complete
 historical basis is supplied; implementing that future workflow requires an
 explicit design and is not part of 5B.3.11D.
 
-Next step: review and merge the test-hardening commit on the review branch,
-then authorize a controlled deployment of the existing projection fix only.
-Do not rerun the attestation import, start a TaxCalculationRun, or make a
-FinancialReviewResolution automatically.
+5B.3.11E fast-forwarded main to `93271e0` and deployed the projection-only
+backend update. The production database remained on revision
+`0013_historical_transfer_evidence` with RawImportRecords 3106,
+HistoricalTransferLinks 11, HistoricalTransferResolutions 11 (6 RESOLVED,
+5 PARTIAL), AcquisitionLots 2711, DisposalEvents 13, FeeEvents 49,
+TradeExecutions 39, ValuationRequirements 2759, FinancialReviewResolutions 2,
+and TaxCalculationRuns 2. Read-only smoke checks show zero active
+`ledger_deposit_requires_review` cases and five active
+`historical_cost_basis_gap` cases. Pre- and post-deploy SQLite backups passed
+integrity checks and had identical SHA-256 values.
+
+No Historical Import, transformation, TaxCalculationRun, FinancialReviewResolution,
+provider call, order, or database repair was performed during deployment.
+The backend is running the approved projection code and remains free of any
+write-side repair operation.
+
+Next step: resolve the five remaining historical cost-basis gaps through
+explicit evidence acquisition and review. Do not rerun the attestation import
+or start a TaxCalculationRun automatically.
 
 ## Handoff discipline
 

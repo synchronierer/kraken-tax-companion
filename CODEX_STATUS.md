@@ -1,5 +1,145 @@
 # Codex Status
 
+## Sprint 5B.3.12A – Forensic inventory of historical cost-basis gaps
+
+Analysis was read-only against the SQLite `Connection.backup()` copy
+`/home/lo/Backups/kraken-tax-companion/production-5b3.11/5b.3.11e-post-deploy-121428.db`.
+No live database, import, transformation, TaxCalculationRun, review decision,
+provider, or order was used. Main remained unchanged at
+`2a48f68d033d4a5ffbd4d51b535d1e129b242ae7`.
+
+### Source inventory
+
+| Source | Hash / period / scope | Forensic value |
+|---|---|---|
+| `kraken-ledger-history-full.json` | SHA-256 `dd78daf2ddae5350b25120edfdce7f5d8f545f8f473bf03deb6b8494a016c97f`; 3006 unique records; 2020-12-22 through 2026-09-26 | Primary Kraken ledger targets and surrounding events |
+| `kraken-trade-history-full.json` | SHA-256 `53b47bae0389f0643b4e2ace21d1e9f828da165b67c3039e768d7a20d0e226d7`; 39 records; 2021-01-05 through 2025-08-08 | Kraken trade context; no source record for any gap |
+| Bitcoin.de BTC statement | SHA-256 `d17428e83f54c477777c621797c8017c2559bd2871dfd5d45fa9fc5d5d3854af`; 2017-10-18 through 2023-02-09 | Primary BTC purchases, withdrawals, and network fees |
+| Bitcoin.de BCH statement | SHA-256 `186842aeac9ea05a874476ce215c625346846d5448a4ad2bf5ca9bc22b7a3c36`; 2017-10-18 through 2022-02-08 | Primary BCH purchases and withdrawals |
+| Bitcoin.de ETH statement | SHA-256 `ba818729ad02db208531986a87c0cb3b15498750038e230059a4be1dfe3a87e7`; 2017-10-18 through 2020-12-22 | Primary ETH purchases and withdrawal fee |
+| `BittrexOrderHistory_2018.csv` | SHA-256 `d540cc1bcfd4f6fa2ecb963f0c8eec784b4a74376ae4b3ef5518d0e006f2339e`; 2018-01-17 through 2018-02-25 | Primary Bittrex buy/sell history |
+| `BittrexOrderHistory_2020.csv` | SHA-256 `6b17456b50d4b24c53a37279f177ba5001e6f4d8298ff6086cb059bcb88914de`; 2020-07-08 | Primary DOGE buy history; no withdrawal/fee record |
+| `bittrex-manual-transfer-evidence.csv` | SHA-256 `2549428e9e61733ac64d45cb9d6feef98829b3f264a9be7d51937a3bfa16d748`; date-only 2020-12-22 | Manual bookkeeping evidence for the two 2020 transfer fees |
+| `historical-user-attestation.csv` | SHA-256 `c3c1146828a9c3ed5401292140dbeb27dbbc9146ae03e41773404e09f8e6a218`; 2021-01-13 through 2022-07-04 | User-attested own-wallet/microtask origin; date and EUR value explicitly unknown |
+
+The referenced `Buchhaltung Krypto(1).ods` is not present locally; only its
+SHA-256-bearing manual transcription is available. No wallet export, faucet or
+microtask statement, payment record, or purchase receipt was found.
+
+### Five active gap records
+
+| Gap | Issue ID | Raw record ID | HistoricalTransferLink ID | Resolution ID | Asset / quantity | Target date | Source / basis |
+|---|---|---|---|---|---|---|---|
+| A | `f5851cf7e9ec4cb79f768bf304e1f24c` | `cd7f45dd92984287974bfff05cee117a` | `1b835d31bf9148b1887ead2dff544f16` | `ffe122370868454c8d81808b5df716c9` | DOGE `118.19411945` | 2020-12-22 transfer | `SELF_TRANSFER`, `PARTIAL`, `original_exchange` |
+| B | `0eb844212cc24482ad38ca476e93fee1` | `94810774d61b47e294bdfd1359008067` | `d36b4dfb7189499a9e38b73cfa3a2da4` | `f21c36d9053c43c2ae8bdd27d946717c` | LTC `0.00406235` | 2020-12-22 transfer | `SELF_TRANSFER`, `PARTIAL`, `original_exchange` |
+| C | `bba946f224a546cf9a5db93e069b4351` | `9b8eee860db54f8ebef586fc839ced20` | `1cf4ac56f19f438bb4a623adb2b1b684` | `85a31c439eb14075ac674f86c0a490cc` | DOGE `318.65944000` | 2021-01-13 01:07:27 UTC | `SELF_TRANSFER`, `PARTIAL`, `user_attestation` |
+| D | `b85b04ab32eb4cbca329eb4532dbcdf6` | `8efa70acf92c4bbb89acfb562177b692` | `a7ba54b09b8d4194beed498bd7eb9bd6` | `b5a776b996244182b61d37a422134afd` | LTC `0.0062935900` | 2021-02-01 15:21:32 UTC | `SELF_TRANSFER`, `PARTIAL`, `user_attestation` |
+| E | `7fa193d09d244c528ec34050f0bdf06a` | `dac7b2a680ee49a0bb0bd31eabafef1b` | `a942e7ceaf04444fbe7ad94dd1c3059b` | `c171b5ac26584635a8ee7be2def3148c` | BTC `0.0003000200` | 2022-07-04 11:03:07 UTC | `SELF_TRANSFER`, `PARTIAL`, `user_attestation` |
+
+All five issues were created by completed `historical-transfer-v1` runs. A/B
+were created at `2026-10-06 20:13:08 UTC`; C/D/E at
+`2026-10-06 21:05:52 UTC`. The active projection intentionally keeps all five
+audit gaps active.
+
+### Per-gap forensic findings
+
+#### A – DOGE 118.19411945
+
+- The Bittrex balance before transfer was `11404.55352573 DOGE`.
+- Two Bittrex buy records prove `841.39125000 + 10444.96815628 =
+  11286.35940628 DOGE` (2018-02-10 and 2020-07-08).
+- The residual `118.19411945 DOGE` is a mathematical balance remainder, not a
+  proven microtask, faucet, reward, or other economic origin.
+- The 2020-12-22 transfer amount and separate 2 DOGE fee are documented, but
+  the residual's receipt date and EUR value are absent. The later DOGE
+  attestation does not apply retroactively.
+- Classification: transfer `SOURCE_PROVEN`; residual origin `SOURCE_PARTIAL`;
+  basis coverage `PARTIAL`. No acquisition window narrower than “present no
+  later than 2020-12-22” is defensible; EUR basis is unknown.
+
+#### B – LTC 0.00406235
+
+- One Bittrex buy proves `1.48860041 LTC` on 2018-02-25.
+- The documented pre-transfer balance was `1.49266276 LTC`; the exact residual
+  is `0.00406235 LTC`.
+- The 2020-12-22 transfer and 0.01 LTC fee are documented. No record proves
+  whether the residual was a microtask, faucet, reward, or another old inflow.
+- Classification: transfer `SOURCE_PROVEN`; residual origin `SOURCE_PARTIAL`;
+  basis coverage `PARTIAL`. The only safe time bound is present by
+  2020-12-22; EUR basis is unknown. The later LTC attestation is unrelated.
+
+#### C – DOGE 318.65944000
+
+- The exact Kraken deposit is present in the ledger and the exact amount is
+  repeated in `historical-user-attestation.csv`.
+- The attestation says own wallet, microtask, `user_attested`; acquisition
+  timestamp, EUR value, and basis are explicitly unknown.
+- Local ledger context shows the preceding DOGE deposit on 2020-12-22 and
+  later Kraken trades, but no external withdrawal, wallet transaction, or
+  receipt record for this amount. Amount equality with the attestation is
+  `SOURCE_PROVEN` for the asserted transfer quantity only; economic origin is
+  `USER_ATTESTED`, not independently proven.
+- The possible acquisition window is only before 2021-01-13; the transfer date
+  must not become an acquisition date. No EUR basis is known.
+
+#### D – LTC 0.0062935900
+
+- The exact Kraken deposit and exact attestation quantity match.
+- The attestation says own wallet and probable microtask origin, but timestamp,
+  EUR value, and basis are unknown.
+- Local LTC ledger context contains only the prior 2020-12-22 deposit and this
+  deposit; no matching external withdrawal, wallet record, or receipt exists.
+- Classification: transfer amount `SOURCE_PROVEN`; economic origin `PROBABLE`
+  and `USER_ATTESTED`; acquisition window only before 2021-02-01; EUR basis
+  unknown. It is not the 2020 LTC residual.
+
+#### E – BTC 0.0003000200
+
+- The exact Kraken deposit and exact attestation quantity match.
+- The attestation says own wallet and probable microtask origin, with timestamp,
+  EUR value, and basis unknown.
+- No local source contains a matching withdrawal or wallet transaction. The
+  documented Bitcoin.de 0.50000000 BTC withdrawal in 2021 and later 2025
+  return transfers are separate quantities and cannot explain this 2022
+  deposit. Classification: transfer amount `SOURCE_PROVEN`; economic origin
+  `PROBABLE`/`USER_ATTESTED`; EUR basis unknown.
+
+### Result matrix
+
+| Gap | Asset | Quantity | Target/context date | Known economic origin | Origin confidence | Known acquisition timestamp | Possible acquisition window | EUR basis known? | Existing source evidence | User attestation | Can close basis gap now? | Missing evidence | Recommended next action |
+|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|
+| A | DOGE | 118.19411945 | 2020-12-22 | Unknown residual before Bittrex transfer | SOURCE_PARTIAL | No | Before 2020-12-22 | No | Two Bittrex buys plus documented transfer/fee; no residual source record | No | POSSIBLY_WITH_ADDITIONAL_SOURCE | Residual deposit/receipt record with date and EUR value | Search old Bittrex deposit/export, wallet, faucet/microtask, or payment evidence |
+| B | LTC | 0.00406235 | 2020-12-22 | Unknown residual before Bittrex transfer | SOURCE_PARTIAL | No | Before 2020-12-22 | No | One Bittrex buy plus documented transfer/fee; no residual source record | No | POSSIBLY_WITH_ADDITIONAL_SOURCE | Residual inflow record with date and EUR value | Search old Bittrex deposit/export, wallet, faucet/microtask, or payment evidence |
+| C | DOGE | 318.65944000 | 2021-01-13 01:07:27 UTC | Microtask, user-attested | USER_ATTESTED | No | Before 2021-01-13 | No | Exact Kraken deposit and attestation quantity only | Yes | POSSIBLY_WITH_USER_ATTESTATION | Receipt date and defensible historical EUR value | Obtain a dated, valued user attestation or independent wallet/service record |
+| D | LTC | 0.0062935900 | 2021-02-01 15:21:32 UTC | Probable microtask, user-attested | PROBABLE | No | Before 2021-02-01 | No | Exact Kraken deposit and attestation quantity only | Yes | POSSIBLY_WITH_USER_ATTESTATION | Receipt date and defensible historical EUR value | Obtain a dated, valued user attestation or independent wallet/service record |
+| E | BTC | 0.0003000200 | 2022-07-04 11:03:07 UTC | Probable microtask, user-attested | PROBABLE | No | Before 2022-07-04 | No | Exact Kraken deposit and attestation quantity only; 0.5 BTC migration excluded | Yes | POSSIBLY_WITH_USER_ATTESTATION | Receipt date and defensible historical EUR value | Obtain a dated, valued user attestation or independent wallet/service record |
+
+No gap can be closed from the currently available local evidence. A/B are the
+best candidates for additional-source acquisition because the transfer nature
+and known purchase lots are strong, while C/D/E require a defensible original
+receipt date and valuation before any historical lot could be considered.
+Transfer dates must never be persisted as acquisition dates, and no zero-cost
+or estimated basis is acceptable.
+
+### Targeted user questions
+
+1. **Gap A (DOGE 118.19411945):** Stammen diese DOGE, die bereits vor dem
+   22.12.2020 auf Bittrex lagen, ebenfalls aus Microtasks/Faucets oder einem
+   anderen alten Zufluss, und gibt es dafür noch einen datierten Beleg oder
+   Wallet-/Bittrex-Export mit historischem Wert?
+2. **Gap B (LTC 0.00406235):** Gibt es für den kleinen LTC-Restbestand neben
+   dem Kauf-Lot einen konkreten alten Zuflussbeleg mit Datum und EUR-Wert?
+3. **Gaps C–E:** Kannst du für jeden einzelnen Microtask-Zufluss einen
+   belastbaren ursprünglichen Receipt-Zeitpunkt und historischen EUR-Wert
+   belegen, ohne den Kraken-Depositzeitpunkt zu verwenden?
+
+### Handoff
+
+All five `historical_cost_basis_gap` cases remain open and fail-closed. No
+repository files were changed on main, no production data was mutated, and no
+import, transformation, TaxCalculationRun, review decision, provider call, or
+order occurred. This forensic report is published only on `codex-status`.
+
 ## Sprint 5B.3.11E – Controlled production deploy
 
 Deployment completed successfully.

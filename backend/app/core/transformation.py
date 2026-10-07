@@ -249,32 +249,30 @@ def active_transformation_issues(
         )
 
     for decision in decisions:
-        current_decision = latest_decisions.get(decision.raw_import_record_id)
-        if current_decision is None or decision_rank(decision) > decision_rank(
-            current_decision
-        ):
+        current = latest_decisions.get(decision.raw_import_record_id)
+        if current is None or decision_rank(decision) > decision_rank(current):
             latest_decisions[decision.raw_import_record_id] = decision
 
     active = []
     for issue in representatives.values():
-        latest_decision = latest_decisions.get(issue.raw_import_record_id)
-        if latest_decision is None:
+        decision = latest_decisions.get(issue.raw_import_record_id)
+        if decision is None:
             active.append(issue)
             continue
         if issue.code in _PERSISTENT_AUDIT_ISSUE_CODES:
             active.append(issue)
             continue
-        if latest_decision.transformation_run_id not in runs:
+        if decision.transformation_run_id not in runs:
             # Missing run provenance cannot safely supersede an issue.
             active.append(issue)
             continue
         if (
-            latest_decision.decision_type
+            decision.decision_type
             in {
                 DecisionType.REVIEW_REQUIRED,
                 DecisionType.CONFLICT,
             }
-            and issue.code == latest_decision.reason_code
+            and issue.code == decision.reason_code
         ):
             active.append(issue)
 

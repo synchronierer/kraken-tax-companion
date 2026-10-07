@@ -1,5 +1,37 @@
 # Codex Status
 
+## Sprint 5B.3.11D – Final CI portability pass
+
+Final review HEAD:
+
+`93271e0fad88fbba943d46acad90db12a6030453`
+
+The Alembic CWD blocker was fixed only in
+`backend/tests/test_migration.py`. A shared test helper derives
+`BACKEND_ROOT` from `__file__`, loads `backend/alembic.ini` by absolute path,
+and sets `script_location` to the absolute `backend/alembic` directory. No
+production migration logic, migration file, or Active-Review production code
+was changed.
+
+Migration tests passed from both contexts:
+
+- repository root: `pytest backend/tests/test_migration.py` — 2 passed
+- `backend/`: `pytest tests/test_migration.py` — 2 passed
+
+The exact repository-root CI command passed: 682 tests, 100% coverage. Ruff,
+Black, Mypy, Markdownlint, Docker Compose validation, and `git diff --check`
+also passed.
+
+GitHub Actions Backend for this HEAD is SUCCESS:
+
+`https://github.com/synchronierer/kraken-tax-companion/actions/runs/37604602716`
+
+No Documentation workflow was triggered by this test-only commit. The latest
+Documentation workflow on the review branch, for `58b9240`, is SUCCESS. Main
+and `origin/main` remain
+`3a18ffeb0de19a3147ae03818d89cdf19502b561`. Production is unchanged and the
+backend remains stopped.
+
 ## Sprint 5B.3.11D – Final Mypy cleanup status
 
 The requested local type-checking fix was applied and pushed to the review

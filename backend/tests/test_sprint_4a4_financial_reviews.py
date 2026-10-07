@@ -27,8 +27,10 @@ from app.core.financial_review import (
     TaxMappingStatus,
 )
 from app.core.transformation import (
+    DecisionType,
     DisposalEvent,
     TradeExecution,
+    TransformationDecision,
     TransformationIssue,
     TransformationRun,
     TransformationStatus,
@@ -456,6 +458,76 @@ def test_active_review_projection_deduplicates_repeated_transformation_run(
     review_client.post("/api/financial-review-suggestions")
     suggestions = list(review_database.scalars(select(FinancialReviewSuggestion)))
     assert len(suggestions) == 2
+
+
+def test_superseded_review_is_hidden_from_apis_and_suggestions(
+    review_client: TestClient, review_database: Session
+) -> None:
+    import_session_id = review_database.scalar(select(ImportSession.id))
+    assert import_session_id is not None
+    old_issue = review_database.scalar(
+        select(TransformationIssue).where(
+            TransformationIssue.raw_import_record_id == EUR_ID
+        )
+    )
+    assert old_issue is not None
+    second_run = TransformationRun(
+        contract_version="kraken-domain-v2",
+        status=TransformationStatus.COMPLETED,
+        started_at=NOW + timedelta(minutes=1),
+        completed_at=NOW + timedelta(minutes=1),
+        actor_id="test-suite",
+        checked_records=1,
+    )
+    second_issue = TransformationIssue(
+        transformation_run_id=second_run.id,
+        raw_import_record_id=EUR_ID,
+        code="ledger_withdrawal_requires_review",
+        message="Historical superseded issue.",
+        is_conflict=False,
+        occurred_at=NOW + timedelta(minutes=1),
+    )
+    decision = TransformationDecision(
+        raw_import_record_id=EUR_ID,
+        import_session_id=import_session_id,
+        transformation_run_id=second_run.id,
+        contract_version="kraken-domain-v2",
+        decision_type=DecisionType.INTERNAL_MOVEMENT,
+        reason_code="ledger_historical_self_transfer_resolved",
+        explanation="Resolved by a later historical transfer decision.",
+        decided_at=NOW + timedelta(minutes=1),
+    )
+    review_database.add_all((second_run, second_issue, decision))
+    review_database.commit()
+    issue_count = review_database.scalar(
+        select(func.count()).select_from(TransformationIssue)
+    )
+    decision_count = review_database.scalar(
+        select(func.count()).select_from(TransformationDecision)
+    )
+
+    assert review_client.get("/api/reviews").json()["total"] == 2
+    assert review_client.get("/api/financial-reviews").json()["total"] == 2
+    assert review_client.get("/api/dashboard").json()["review_cases"] == 2
+    suggestions_response = review_client.post("/api/financial-review-suggestions")
+    assert suggestions_response.status_code == 200
+    suggestion_links = list(
+        review_database.scalars(
+            select(FinancialReviewRecordLink).where(
+                FinancialReviewRecordLink.raw_import_record_id == EUR_ID
+            )
+        )
+    )
+    assert suggestion_links == []
+    assert review_client.get(f"/api/reviews/{old_issue.id}").status_code == 200
+    assert (
+        review_database.scalar(select(func.count()).select_from(TransformationIssue))
+        == issue_count
+    )
+    assert (
+        review_database.scalar(select(func.count()).select_from(TransformationDecision))
+        == decision_count
+    )
 
 
 def test_resolution_closes_all_historical_issue_representatives(

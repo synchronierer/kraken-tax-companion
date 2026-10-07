@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.core.transformation import (
     DecisionType,
@@ -194,3 +194,160 @@ def test_cost_basis_gap_remains_active_after_transfer_decision() -> None:
     )
 
     assert active_transformation_issues([issue], {run.id: run}, [decision]) == (issue,)
+
+
+def test_latest_review_required_decision_selects_newest_issue() -> None:
+    first_at = datetime(2026, 1, 1, tzinfo=UTC)
+    first = _run(first_at)
+    second = _run(first_at + timedelta(minutes=1))
+    raw_id = uuid4()
+    old = _issue(first, raw_id, "ledger_deposit_requires_review", first_at)
+    new = _issue(second, raw_id, "ledger_deposit_requires_review", second.started_at)
+
+    projected = active_transformation_issues(
+        [new, old],
+        {first.id: first, second.id: second},
+        [
+            _decision(
+                first,
+                raw_id,
+                DecisionType.REVIEW_REQUIRED,
+                "ledger_deposit_requires_review",
+                first.started_at,
+            ),
+            _decision(
+                second,
+                raw_id,
+                DecisionType.REVIEW_REQUIRED,
+                "ledger_deposit_requires_review",
+                second.started_at,
+            ),
+        ],
+    )
+
+    assert projected == (new,)
+
+
+def test_new_conflict_supersedes_old_review_for_same_raw() -> None:
+    first_at = datetime(2026, 1, 1, tzinfo=UTC)
+    first = _run(first_at)
+    second = _run(first_at + timedelta(minutes=1))
+    raw_id = uuid4()
+    old = _issue(first, raw_id, "old_review", first_at)
+    conflict = _issue(second, raw_id, "new_conflict", second.started_at)
+
+    projected = active_transformation_issues(
+        [old, conflict],
+        {first.id: first, second.id: second},
+        [
+            _decision(
+                first, raw_id, DecisionType.REVIEW_REQUIRED, "old_review", first_at
+            ),
+            _decision(
+                second,
+                raw_id,
+                DecisionType.CONFLICT,
+                "new_conflict",
+                second.started_at,
+            ),
+        ],
+    )
+
+    assert projected == (conflict,)
+
+
+def test_non_reviewing_domain_decisions_remove_conflict_reviews() -> None:
+    first_at = datetime(2026, 1, 1, tzinfo=UTC)
+    first = _run(first_at)
+    second = _run(first_at + timedelta(minutes=1))
+    raw_id = uuid4()
+    issue = _issue(first, raw_id, "asset_conflict", first_at)
+
+    for decision_type in (
+        DecisionType.DOMAIN_EVENT_CREATED,
+        DecisionType.DOMAIN_EVENT_REUSED,
+    ):
+        decision = _decision(
+            second,
+            raw_id,
+            decision_type,
+            "ledger_historical_self_transfer_resolved",
+            second.started_at,
+        )
+        assert (
+            active_transformation_issues(
+                [issue], {first.id: first, second.id: second}, [decision]
+            )
+            == ()
+        )
+
+
+def test_supersession_is_scoped_to_one_raw_record() -> None:
+    first_at = datetime(2026, 1, 1, tzinfo=UTC)
+    first = _run(first_at)
+    second = _run(first_at + timedelta(minutes=1))
+    superseded_raw = uuid4()
+    unaffected_raw = uuid4()
+    superseded = _issue(first, superseded_raw, "old_review", first_at)
+    unaffected = _issue(first, unaffected_raw, "other_review", first_at)
+    decision = _decision(
+        second,
+        superseded_raw,
+        DecisionType.INTERNAL_MOVEMENT,
+        "ledger_historical_self_transfer_resolved",
+        second.started_at,
+    )
+
+    projected = active_transformation_issues(
+        [superseded, unaffected], {first.id: first, second.id: second}, [decision]
+    )
+
+    assert projected == (unaffected,)
+
+
+def test_latest_decision_uses_decided_at_then_uuid_tie_break() -> None:
+    started_at = datetime(2026, 1, 1, tzinfo=UTC)
+    run = _run(started_at)
+    raw_id = uuid4()
+    issue = _issue(run, raw_id, "review_code", started_at)
+    earlier = _decision(
+        run,
+        raw_id,
+        DecisionType.REVIEW_REQUIRED,
+        "review_code",
+        started_at,
+    )
+    later = _decision(
+        run,
+        raw_id,
+        DecisionType.INTERNAL_MOVEMENT,
+        "resolved",
+        started_at + timedelta(seconds=1),
+    )
+    assert active_transformation_issues([issue], {run.id: run}, [later, earlier]) == ()
+
+    low_id = UUID("00000000-0000-0000-0000-000000000001")
+    high_id = UUID("00000000-0000-0000-0000-000000000002")
+    low = TransformationDecision(
+        raw_import_record_id=raw_id,
+        import_session_id=uuid4(),
+        transformation_run_id=run.id,
+        contract_version="test-v1",
+        decision_type=DecisionType.REVIEW_REQUIRED,
+        reason_code="review_code",
+        explanation="low id",
+        decided_at=started_at,
+        id=low_id,
+    )
+    high = TransformationDecision(
+        raw_import_record_id=raw_id,
+        import_session_id=uuid4(),
+        transformation_run_id=run.id,
+        contract_version="test-v1",
+        decision_type=DecisionType.INTERNAL_MOVEMENT,
+        reason_code="resolved",
+        explanation="high id",
+        decided_at=started_at,
+        id=high_id,
+    )
+    assert active_transformation_issues([issue], {run.id: run}, [low, high]) == ()

@@ -454,9 +454,22 @@ project to 0, active cost-basis gaps remain 5, and the structural counts remain
 unchanged. Production itself was not changed by 5B.3.11D, and the backend must
 remain stopped until this change is reviewed and separately deployed.
 
-Next step: review the code/test diff and authorize a controlled deployment of
-the projection fix only. Do not rerun the attestation import, start a
-TaxCalculationRun, or make a FinancialReviewResolution automatically.
+5B.3.11D review hardening adds regression coverage for same-code review
+supersession, conflict and domain-event decisions, independent raw records,
+deterministic decision ordering, API/dashboard counts, suggestion suppression,
+historical audit retention, and the persistent cost-basis-gap behavior. The
+production projection code is unchanged by this hardening pass.
+
+Known future limitation: the active projection intentionally treats
+`historical_cost_basis_gap` as a persistent audit issue. There is currently no
+separate active-projection semantics for deactivating that gap after a complete
+historical basis is supplied; implementing that future workflow requires an
+explicit design and is not part of 5B.3.11D.
+
+Next step: review and merge the test-hardening commit on the review branch,
+then authorize a controlled deployment of the existing projection fix only.
+Do not rerun the attestation import, start a TaxCalculationRun, or make a
+FinancialReviewResolution automatically.
 
 ## Handoff discipline
 

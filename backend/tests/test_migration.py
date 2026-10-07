@@ -7,13 +7,21 @@ from sqlalchemy import create_engine, inspect, text
 from alembic import command
 from app.config.settings import get_settings
 
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+
+def alembic_config() -> Config:
+    config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    return config
+
 
 def test_domain_migration_up_and_down(tmp_path: Path, monkeypatch: object) -> None:
     database_path = tmp_path / "migration.db"
     database_url = f"sqlite:///{database_path}"
     monkeypatch.setenv("APP_DATABASE_URL", database_url)  # type: ignore[attr-defined]
     get_settings.cache_clear()
-    config = Config("alembic.ini")
+    config = alembic_config()
 
     command.upgrade(config, "0003_import_batch_model")
     engine = create_engine(database_url)
@@ -251,7 +259,7 @@ def test_export_format_migration_backfills_legacy_runs(
     database_url = f"sqlite:///{tmp_path / 'export-format.db'}"
     monkeypatch.setenv("APP_DATABASE_URL", database_url)  # type: ignore[attr-defined]
     get_settings.cache_clear()
-    config = Config("alembic.ini")
+    config = alembic_config()
     command.upgrade(config, "0009_tax_review_decisions")
     engine = create_engine(database_url)
     tax_run_id = uuid4().hex
